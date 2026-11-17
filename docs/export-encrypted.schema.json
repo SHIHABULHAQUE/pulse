@@ -1,0 +1,79 @@
+{
+  "$id": "https://pulse.app/schemas/export-encrypted.schema.json",
+  "$ref": "#/definitions/PulseEncryptedExport",
+  "definitions": {
+    "PulseEncryptedExport": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "pulse-export-encrypted"
+        },
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "kdf": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "const": "PBKDF2"
+            },
+            "hash": {
+              "type": "string",
+              "const": "SHA-256"
+            },
+            "iterations": {
+              "type": "integer",
+              "minimum": 100000,
+              "maximum": 10000000
+            },
+            "salt": {
+              "type": "string",
+              "maxLength": 20000
+            }
+          },
+          "required": [
+            "name",
+            "hash",
+            "iterations",
+            "salt"
+          ],
+          "additionalProperties": false
+        },
+        "cipher": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "const": "AES-GCM"
+            },
+            "iv": {
+              "type": "string",
+              "maxLength": 20000
+            }
+          },
+          "required": [
+            "name",
+            "iv"
+          ],
+          "additionalProperties": false
+        },
+        "ciphertext": {
+          "type": "string",
+          "maxLength": 209715200
+        }
+      },
+      "required": [
+        "format",
+        "version",
+        "kdf",
+        "cipher",
+        "ciphertext"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

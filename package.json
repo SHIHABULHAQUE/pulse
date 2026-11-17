@@ -1,0 +1,21 @@
+{
+  "name": "pulse",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.8.1",
+  "scripts": {
+    "dev": "pnpm --filter @pulse/protocol build && pnpm --parallel --filter @pulse/server --filter @pulse/web dev",
+    "build": "pnpm --filter @pulse/protocol build && pnpm --filter @pulse/server build && pnpm --filter @pulse/web build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "start": "node apps/server/dist/index.js",
+    "e2e": "pnpm build && playwright test",
+    "gen:schema": "pnpm --filter @pulse/protocol gen:schema"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

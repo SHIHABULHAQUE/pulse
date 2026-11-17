@@ -1,0 +1,322 @@
+{
+  "$id": "https://pulse.app/schemas/export.schema.json",
+  "$ref": "#/definitions/PulseExport",
+  "definitions": {
+    "PulseExport": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "const": "pulse-export"
+        },
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "exportedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "app": {
+          "type": "string",
+          "maxLength": 40,
+          "default": "pulse"
+        },
+        "identity": {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "const": "ECDSA-P256"
+            },
+            "publicKeySpki": {
+              "type": "string",
+              "minLength": 40,
+              "maxLength": 400
+            },
+            "publicKeyJwk": {
+              "type": "object",
+              "properties": {
+                "kty": {
+                  "type": "string",
+                  "const": "EC"
+                },
+                "crv": {
+                  "type": "string",
+                  "const": "P-256"
+                },
+                "x": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "y": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "d": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "ext": {
+                  "type": "boolean"
+                },
+                "key_ops": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "kty",
+                "crv",
+                "x",
+                "y"
+              ],
+              "additionalProperties": true
+            },
+            "privateKeyJwk": {
+              "type": "object",
+              "properties": {
+                "kty": {
+                  "type": "string",
+                  "const": "EC"
+                },
+                "crv": {
+                  "type": "string",
+                  "const": "P-256"
+                },
+                "x": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "y": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "d": {
+                  "type": "string",
+                  "maxLength": 20000
+                },
+                "ext": {
+                  "type": "boolean"
+                },
+                "key_ops": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "kty",
+                "crv",
+                "x",
+                "y"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "algorithm",
+            "publicKeySpki",
+            "publicKeyJwk",
+            "privateKeyJwk"
+          ],
+          "additionalProperties": false
+        },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "handle": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 32
+            },
+            "bio": {
+              "type": "string",
+              "maxLength": 280,
+              "default": ""
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "online",
+                "away",
+                "dnd",
+                "invisible"
+              ],
+              "default": "online"
+            }
+          },
+          "required": [
+            "handle"
+          ],
+          "additionalProperties": false
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "readReceipts": {
+              "type": "boolean",
+              "default": true
+            },
+            "typingIndicators": {
+              "type": "boolean",
+              "default": true
+            },
+            "sounds": {
+              "type": "boolean",
+              "default": true
+            },
+            "theme": {
+              "type": "string",
+              "enum": [
+                "system",
+                "dark",
+                "light"
+              ],
+              "default": "system"
+            },
+            "language": {
+              "type": "string",
+              "maxLength": 10,
+              "default": "en"
+            }
+          },
+          "additionalProperties": true
+        },
+        "contacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "publicKey": {
+                "type": "string",
+                "minLength": 40,
+                "maxLength": 400
+              },
+              "handle": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "addedAt": {
+                "type": "integer"
+              },
+              "blocked": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "publicKey",
+              "handle",
+              "addedAt"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        },
+        "rooms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{3,48}$"
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "owned": {
+                "type": "boolean",
+                "default": false
+              },
+              "joinedAt": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "joinedAt"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "clientMessageId": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "roomId": {
+                "type": "string",
+                "maxLength": 48
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 4000
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "publicKey": {
+                    "type": "string",
+                    "maxLength": 400
+                  },
+                  "handle": {
+                    "type": "string",
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "publicKey",
+                  "handle"
+                ],
+                "additionalProperties": false
+              },
+              "sentAt": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "clientMessageId",
+              "roomId",
+              "text",
+              "author",
+              "sentAt"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 200000
+        }
+      },
+      "required": [
+        "format",
+        "version",
+        "exportedAt",
+        "identity",
+        "profile",
+        "settings",
+        "contacts",
+        "rooms",
+        "messages"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

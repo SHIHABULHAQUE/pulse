@@ -1,0 +1,10 @@
+# Render.com blueprint (free tier works for chat; free instances sleep after ~15 min idle).
+services:
+  - type: web
+    name: pulse
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false   # set to https://your-domain after attaching it

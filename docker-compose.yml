@@ -1,0 +1,34 @@
+services:
+  pulse:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      # Set to your public origin(s) in production, e.g. https://pulse.example.com
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - pulse-data:/app/data   # pinned public room definitions only (rooms.json)
+
+  # TURN relay for calls behind strict NATs (used from Phase 3). Needs UDP open on the host.
+  coturn:
+    image: coturn/coturn:4.6.3
+    profiles: [media]
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --realm=${TURN_REALM:-pulse.local}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET}
+      - --fingerprint
+      - --no-cli
+      - --no-tlsv1
+      - --no-tlsv1_1
+      - --min-port=49160
+      - --max-port=49200
+
+volumes:
+  pulse-data:
