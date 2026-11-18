@@ -87,7 +87,7 @@ test('export and re-import keeps the same identity', async ({ page }) => {
   await expect(page.locator('.settings code')).not.toHaveText(fingerprint);
 
   page.once('dialog', (d) => void d.accept());
-  await page.locator('input[type=file]').setInputFiles(path);
+  await page.locator('input[type=file][accept*=json]').setInputFiles(path);
   await page.waitForEvent('load');
   await page.getByRole('button', { name: 'Settings and data' }).click();
   await expect(page.locator('.settings code')).toHaveText(fingerprint);

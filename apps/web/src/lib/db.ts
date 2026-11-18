@@ -1,13 +1,27 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { ChatMessage, Status } from '@pulse/protocol';
+import type { Author, ImageAttachment, Status } from '@pulse/protocol';
 
 export type DeliveryState = 'pending' | 'sent' | 'failed';
-export type LocalMessage = ChatMessage & { state: DeliveryState; error?: string };
+/** A message as stored on this device: always decrypted. */
+export type LocalMessage = {
+  id: string;
+  clientMessageId: string;
+  roomId: string;
+  text: string;
+  image?: ImageAttachment;
+  /** Sent end-to-end encrypted (locked room). */
+  encrypted?: boolean;
+  author: Author;
+  sentAt: number;
+  state: DeliveryState;
+  error?: string;
+};
 
 export type StoredIdentity = { publicKeySpki: string; publicKeyJwk: JsonWebKey; privateKeyJwk: JsonWebKey; createdAt: number };
 export type Profile = { handle: string; bio: string; status: Status };
 export type Settings = { readReceipts: boolean; typingIndicators: boolean; sounds: boolean; theme: 'system' | 'dark' | 'light'; language: string };
-export type JoinedRoom = { id: string; name: string; owned: boolean; joinedAt: number };
+/** secret: password-derived join proof and AES key for locked rooms (see roomCrypto.ts). */
+export type JoinedRoom = { id: string; name: string; owned: boolean; joinedAt: number; secret?: { proof: string; key: string } };
 export type Contact = { publicKey: string; handle: string; addedAt: number; blocked: boolean };
 
 export const DEFAULT_SETTINGS: Settings = { readReceipts: true, typingIndicators: true, sounds: true, theme: 'system', language: 'en' };
@@ -17,7 +31,7 @@ type KvShape = { identity: StoredIdentity; profile: Profile; settings: Settings;
 interface PulseDB extends DBSchema {
   kv: { key: keyof KvShape; value: KvShape[keyof KvShape] };
   messages: { key: string; value: LocalMessage; indexes: { byRoom: [string, number] } };
-  outbox: { key: string; value: { clientMessageId: string; roomId: string; text: string; queuedAt: number } };
+  outbox: { key: string; value: { clientMessageId: string; roomId: string; text: string; image?: ImageAttachment; queuedAt: number } };
 }
 
 export const DB_NAME = 'pulse';

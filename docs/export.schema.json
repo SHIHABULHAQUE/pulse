@@ -237,6 +237,24 @@
               },
               "joinedAt": {
                 "type": "integer"
+              },
+              "secret": {
+                "type": "object",
+                "properties": {
+                  "proof": {
+                    "type": "string",
+                    "maxLength": 20000
+                  },
+                  "key": {
+                    "type": "string",
+                    "maxLength": 20000
+                  }
+                },
+                "required": [
+                  "proof",
+                  "key"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -268,6 +286,39 @@
               "text": {
                 "type": "string",
                 "maxLength": 4000
+              },
+              "image": {
+                "type": "object",
+                "properties": {
+                  "mime": {
+                    "type": "string",
+                    "enum": [
+                      "image/webp",
+                      "image/jpeg",
+                      "image/png"
+                    ]
+                  },
+                  "data": {
+                    "type": "string",
+                    "maxLength": 600000
+                  },
+                  "width": {
+                    "type": "integer"
+                  },
+                  "height": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "mime",
+                  "data",
+                  "width",
+                  "height"
+                ],
+                "additionalProperties": false
+              },
+              "encrypted": {
+                "type": "boolean"
               },
               "author": {
                 "type": "object",

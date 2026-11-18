@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { HandleSchema, RoomSettingsSchema, type RoomSettings } from '@pulse/protocol';
+import { HandleSchema, RoomSettingsSchema, type Room, type RoomSettings } from '@pulse/protocol';
 import { Modal } from './Modal';
 import { toast, usePulse } from '../store';
 import { createRoom, joinRoom, refreshDirectory, updateProfile } from '../lib/client';
@@ -13,16 +13,24 @@ const close = () => usePulse.getState().set({ dialog: null });
 /* ------------------------------------------------------------------ create room */
 
 export function CreateRoomDialog() {
-  const [form, setForm] = useState<RoomSettings>({ name: '', topic: '', emoji: '💬', mode: 'text', memberCap: 100, slowModeSec: 0, rules: '' });
+  const [form, setForm] = useState<RoomSettings>({ name: '', topic: '', emoji: '💬', mode: 'both', memberCap: 100, slowModeSec: 0, rules: '' });
+  const [usePassword, setUsePassword] = useState(false);
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const update = <K extends keyof RoomSettings>(key: K, value: RoomSettings[K]) => setForm((f) => ({ ...f, [key]: value }));
 
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
     const parsed = RoomSettingsSchema.safeParse(form);
     if (!parsed.success) { setError(parsed.error.issues[0]?.message ?? 'Check the form'); return; }
-    if (!createRoom(parsed.data)) { setError('You are offline'); return; }
-    close();
+    if (usePassword && password.length < 4) { setError('Use a password of at least 4 characters'); return; }
+    setBusy(true);
+    try {
+      if (!(await createRoom(parsed.data, usePassword ? password : undefined))) { setError('You are offline'); return; }
+      close();
+    } finally { setBusy(false); }
   }
 
   return (
@@ -47,9 +55,23 @@ export function CreateRoomDialog() {
           </label>
         </div>
         <label className="field"><span>Rules</span><textarea rows={3} value={form.rules} maxLength={2000} onChange={(e) => update('rules', e.target.value)} placeholder="Be kind. Stay on topic." /></label>
-        <p className="hint">Public room, visible in the directory. Empty rooms expire after a while unless you pin them. Private rooms arrive with end-to-end encryption in a later phase.</p>
+
+        <fieldset className="lock-box">
+          <legend className="sr-only">Access</legend>
+          <label className="toggle"><input type="radio" name="access" checked={!usePassword} onChange={() => setUsePassword(false)} /> <span><strong>Open</strong><small>Anyone can join from the directory.</small></span></label>
+          <label className="toggle"><input type="radio" name="access" checked={usePassword} onChange={() => setUsePassword(true)} /> <span><strong>🔒 Password protected</strong><small>Only people with the password can join. Messages and images are end-to-end encrypted with it, so the server can't read them.</small></span></label>
+          {usePassword && (
+            <div className="inline-form">
+              <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Room password" aria-label="Room password" autoComplete="new-password" autoFocus />
+              <button type="button" className="ghost-button small" onClick={() => setShowPassword((v) => !v)}>{showPassword ? 'Hide' : 'Show'}</button>
+            </div>
+          )}
+          {usePassword && <p className="warn">Share the password privately. It can't be recovered or changed. If it's lost, messages in this room can't be decrypted.</p>}
+        </fieldset>
+
+        <p className="hint">Listed in the room directory. Empty rooms expire after a while unless you pin them.</p>
         {error && <p className="form-error" role="alert">{error}</p>}
-        <div className="row-actions end"><button type="button" className="ghost-button" onClick={close}>Cancel</button><button className="primary" type="submit">Create room</button></div>
+        <div className="row-actions end"><button type="button" className="ghost-button" onClick={close}>Cancel</button><button className="primary" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create room'}</button></div>
       </form>
     </Modal>
   );
@@ -75,23 +97,47 @@ export function DirectoryDialog() {
         <input type="search" className="search-input" autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rooms by name or topic" aria-label="Search rooms" />
         <p className="hint">Sorted by people active right now.</p>
         <ul className="directory-list">
-          {rooms.map((r, i) => (
-            <li key={r.id} className="directory-item">
-              <span className="room-emoji" aria-hidden="true">{r.emoji}</span>
-              <div className="grow">
-                <strong>{r.name}</strong>{i < 3 && r.members > 0 && <span className="badge hot">trending</span>}{r.pinned && <span className="badge">pinned</span>}
-                <small>{r.topic || 'No topic'}</small>
-                <small className="muted">{r.members}/{r.memberCap} online · {r.mode === 'text' ? 'text' : r.mode === 'voice' ? 'voice' : 'text + voice'}{r.slowModeSec ? ` · slow mode ${r.slowModeSec}s` : ''}</small>
-              </div>
-              <button className={joinedIds.has(r.id) ? 'ghost-button small' : 'primary small'} onClick={() => joinRoom(r.id)} disabled={!joinedIds.has(r.id) && r.members >= r.memberCap}>
-                {joinedIds.has(r.id) ? 'Open' : r.members >= r.memberCap ? 'Full' : 'Join'}
-              </button>
-            </li>
-          ))}
+          {rooms.map((r, i) => <DirectoryItem key={r.id} room={r} trending={i < 3 && r.members > 0} joined={joinedIds.has(r.id)} />)}
           {rooms.length === 0 && <li className="muted">No rooms match. <button className="link" onClick={() => usePulse.getState().set({ dialog: 'create' })}>Create one</button></li>}
         </ul>
       </div>
     </Modal>
+  );
+}
+
+function DirectoryItem({ room: r, trending, joined }: { room: Room; trending: boolean; joined: boolean }) {
+  const [asking, setAsking] = useState(false);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const full = !joined && r.members >= r.memberCap;
+
+  async function join(event?: FormEvent) {
+    event?.preventDefault();
+    if (r.locked && !joined && !asking) { setAsking(true); return; }
+    setBusy(true);
+    try { await joinRoom(r.id, password || undefined); } finally { setBusy(false); }
+  }
+
+  return (
+    <li className="directory-item">
+      <span className="room-emoji" aria-hidden="true">{r.emoji}</span>
+      <div className="grow">
+        <strong>{r.locked && <span aria-label="Password protected">🔒 </span>}{r.name}</strong>{trending && <span className="badge hot">trending</span>}{r.pinned && <span className="badge">pinned</span>}
+        <small>{r.topic || 'No topic'}</small>
+        <small className="muted">{r.members}/{r.memberCap} online · {r.mode === 'text' ? 'text' : r.mode === 'voice' ? 'voice' : 'text + voice'}{r.slowModeSec ? ` · slow mode ${r.slowModeSec}s` : ''}{r.locked ? ' · end-to-end encrypted' : ''}</small>
+        {asking && !joined && (
+          <form className="inline-form room-password" onSubmit={(e) => void join(e)}>
+            <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Room password" aria-label={`Password for ${r.name}`} />
+            <button className="primary small" type="submit" disabled={!password || busy}>{busy ? 'Checking…' : 'Unlock'}</button>
+          </form>
+        )}
+      </div>
+      {!asking && (
+        <button className={joined ? 'ghost-button small' : 'primary small'} onClick={() => void join()} disabled={full || busy}>
+          {joined ? 'Open' : full ? 'Full' : r.locked ? 'Enter password' : 'Join'}
+        </button>
+      )}
+    </li>
   );
 }
 

@@ -6,13 +6,14 @@ import { LIMITS } from '@pulse/protocol';
 import { config } from './config.js';
 import { Hub, metrics } from './hub.js';
 import { RoomRegistry } from './rooms.js';
+import { iceServersFor } from './turn.js';
 import { prometheus, securityHeaders, serveStatic } from './http.js';
 
 // Logs never include message content, handles or locations: only ids, counts and error codes.
 const log = pino({ level: config.logLevel, redact: ['req.headers.cookie', 'req.headers.authorization'] });
 
 const rooms = new RoomRegistry({ dataDir: config.dataDir, idleMs: config.roomIdleMs, debounceMs: config.snapshotDebounceMs, onError: (err) => log.warn({ err }, 'room snapshot error') });
-const hub = new Hub(rooms, { maxBufferedBytes: config.maxBufferedBytes, log });
+const hub = new Hub(rooms, { maxBufferedBytes: config.maxBufferedBytes, log, iceServers: (label) => iceServersFor(label, config) });
 
 const httpServer = createServer((req, res) => {
   securityHeaders(res, config.production);
@@ -34,6 +35,9 @@ const httpServer = createServer((req, res) => {
       pulse_auth_failures_total: { help: 'Failed identity handshakes', type: 'counter', value: metrics.authFailuresTotal },
       pulse_resumes_total: { help: 'Sessions resumed with a token', type: 'counter', value: metrics.resumesTotal },
       pulse_dropped_backpressure_total: { help: 'Frames dropped due to slow consumers', type: 'counter', value: metrics.droppedBackpressureTotal },
+      pulse_images_relayed_total: { help: 'Image messages relayed (never stored)', type: 'counter', value: metrics.imagesRelayedTotal },
+      pulse_voice_joins_total: { help: 'Voice channel joins', type: 'counter', value: metrics.voiceJoinsTotal },
+      pulse_rtc_signals_relayed_total: { help: 'WebRTC signalling messages relayed', type: 'counter', value: metrics.signalsRelayedTotal },
       pulse_ws_rejected_total: { help: 'WebSocket upgrades rejected (origin/path)', type: 'counter', value: wsRejected }
     }));
     return;
@@ -96,7 +100,7 @@ setInterval(() => hub.sweep(), 15_000).unref();
 /* ------------------------------------------------------------------ boot / shutdown */
 
 const restored = await rooms.load().catch((err) => { log.warn({ err }, 'could not load room snapshot'); return 0; });
-httpServer.listen(config.port, config.host, () => log.info({ port: config.port, restoredRooms: restored, webDist: config.webDist }, 'Pulse server listening'));
+httpServer.listen(config.port, config.host, () => log.info({ port: config.port, restoredRooms: restored, webDist: config.webDist, turn: config.turnUrls.length > 0 }, 'Pulse server listening'));
 
 async function shutdown(signal: string): Promise<void> {
   log.info({ signal }, 'shutting down');

@@ -56,7 +56,9 @@ export const ExportRoomSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]{3,48}$/),
   name: z.string().max(80),
   owned: z.boolean().default(false),
-  joinedAt: z.number().int()
+  joinedAt: z.number().int(),
+  /** Password-derived values for locked rooms so this device can rejoin and decrypt. Optional (added in v1, additive). */
+  secret: z.object({ proof: b64, key: b64 }).optional()
 });
 
 export const ExportMessageSchema = z.object({
@@ -64,6 +66,10 @@ export const ExportMessageSchema = z.object({
   clientMessageId: z.string().max(80),
   roomId: z.string().max(48),
   text: z.string().max(4000),
+  /** Decrypted image as stored on the device. Optional (additive). */
+  image: z.object({ mime: z.enum(['image/webp', 'image/jpeg', 'image/png']), data: z.string().max(600_000), width: z.number().int(), height: z.number().int() }).optional(),
+  /** True if it was sent end-to-end encrypted in a locked room. */
+  encrypted: z.boolean().optional(),
   author: z.object({ publicKey: z.string().max(400), handle: z.string().max(32) }),
   sentAt: z.number().int()
 });

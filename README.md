@@ -8,10 +8,11 @@ Pulse is an account-free realtime communication PWA. There is **no database**: t
 | --- | --- | --- |
 | 1 | Monorepo, Zod protocol, P-256 identity, signed handshake, presence | ✅ Done |
 | 2 | Public rooms (create, directory, trending, slow mode, caps, expiry, pinning + `rooms.json`), text chat, IndexedDB, export/import (+ encrypted), offline queue, local search | ✅ Done |
-| 3 | 1:1 voice/video (P2P), TURN, Web Push for calls | ⏳ Next |
-| 4 | DMs + private rooms with E2EE, file transfer over DataChannel | ⏳ |
+| — | **Password-protected rooms (E2EE), image messages, group voice (P2P mesh, ≤ 8)** | ✅ Done (pulled forward on request) |
+| 3 | 1:1 voice/video (P2P), TURN, Web Push for calls | ⏳ Next (TURN config + ICE servers already in place) |
+| 4 | DMs with E2EE, invite links, file transfer | ⏳ (password rooms already E2EE) |
 | 5 | Nearby discovery | ⏳ |
-| 6 | Group calls (mesh → mediasoup SFU), screen share | ⏳ |
+| 6 | Group video, mediasoup SFU for > 8 people, screen share | ⏳ (voice mesh done) |
 | 7 | Safety layer, moderation, full rate-limit policy | ⏳ (token-bucket limits already in place) |
 | 8 | PWA/service worker, i18n (en/bn), a11y audit, load test, STRIDE + privacy docs | ⏳ |
 
@@ -72,6 +73,10 @@ pnpm gen:schema   # regenerate docs/export.schema.json from the Zod source
 | `DATA_DIR` | `apps/server/data` | Where `rooms.json` is written. Empty string disables it |
 | `ROOM_IDLE_MINUTES` | `30` | Empty, unpinned rooms expire after this |
 | `LOG_LEVEL` | `info` | pino level. Logs never contain message text, handles or locations |
+| `STUN_URLS` | Google + Cloudflare STUN | Comma-separated STUN servers given to callers |
+| `TURN_URLS` | *(empty)* | Comma-separated TURN URLs, e.g. `turn:turn.example.com:3478,turns:turn.example.com:5349`. Needed for calls between strict NATs (many mobile networks) |
+| `TURN_SECRET` | *(empty)* | coturn `--static-auth-secret`: clients get HMAC credentials that expire after `TURN_TTL_SECONDS` (default 6 h) |
+| `TURN_USERNAME` / `TURN_CREDENTIAL` | *(empty)* | Alternative: fixed credentials from a hosted TURN service |
 
 ## Deploy
 
@@ -109,17 +114,36 @@ Every frame is `{ "v": 1, "type", "requestId", "payload" }`, validated with Zod 
 | S → C | `presence.snapshot` | `[{ publicKey, handle, status, rooms[] }]` (invisible users omitted) |
 | C → S | `room.list` | — |
 | S → C | `room.listed` | `{ rooms }` (public rooms, busiest first) |
-| C → S | `room.create` | `{ name, topic, emoji, mode, memberCap, slowModeSec, rules }` |
-| C → S | `room.join` / `room.leave` | `{ roomId }` |
+| C → S | `room.create` | `{ name, topic, emoji, mode, memberCap, slowModeSec, rules, lock?: { salt, proof } }` |
+| C → S | `room.join` | `{ roomId, proof? }` (proof required for locked rooms) |
+| C → S | `room.leave` | `{ roomId }` |
 | S → C | `room.joined` | room |
 | S → C | `room.left` / `room.removed` | `{ roomId }` |
 | S → C | `room.updated` | room (broadcast on membership/pin changes) |
 | C → S | `room.pin` | `{ roomId, pinned }` (owner only) |
-| C → S | `chat.send` | `{ roomId, text, clientMessageId }` |
-| S → C | `chat.message` | `{ id, clientMessageId, roomId, text, author: { publicKey, handle }, sentAt }` |
+| C → S | `chat.send` | `{ roomId, clientMessageId, text, image? }` in open rooms, `{ roomId, clientMessageId, enc: { iv, ct } }` in locked rooms |
+| S → C | `chat.message` | `{ id, clientMessageId, roomId, text, image?, enc?, author: { publicKey, handle }, sentAt }` |
+| C → S | `voice.join` | `{ roomId, muted }` (rooms of mode `voice`/`both`, max 8) |
+| S → C | `voice.joined` | `{ roomId, sessionId, iceServers }` |
+| C → S | `voice.leave` / `voice.mute` | — / `{ muted }` |
+| S → C | `voice.state` | `{ roomId, participants: [{ sessionId, publicKey, handle, muted }] }` (sent to all room members) |
+| S → C | `voice.left` | `{ roomId }` |
+| C ↔ S | `rtc.signal` | `{ to | from, description?, candidate? }` (relayed only between two members of the same voice channel) |
 | S → C | `server.error` | `{ code, message, retryAfterMs? }` |
 
-Error codes: `INVALID_MESSAGE`, `AUTH_FAILED`, `NOT_AUTHENTICATED`, `RATE_LIMITED`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NOT_IN_ROOM`, `TOO_MANY_ROOMS`, `SLOW_MODE`, `FORBIDDEN`, `INTERNAL`.
+Error codes: `INVALID_MESSAGE`, `AUTH_FAILED`, `NOT_AUTHENTICATED`, `RATE_LIMITED`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NOT_IN_ROOM`, `TOO_MANY_ROOMS`, `SLOW_MODE`, `FORBIDDEN`, `BAD_PASSWORD`, `ENCRYPTION_REQUIRED`, `VOICE_DISABLED`, `VOICE_FULL`, `NOT_IN_VOICE`, `INTERNAL`.
+
+### Password-protected rooms
+
+From the password and the room's public salt the client derives two independent values with PBKDF2-SHA256 (310k iterations): a **join proof** (sent to the server, which stores only `scrypt(proof)`) and an **AES-GCM-256 room key** (never leaves devices). Messages and images are encrypted with the room id as additional data. The server refuses plaintext in locked rooms and ciphertext in open rooms. Passwords can't be recovered or changed.
+
+### Images
+
+Re-encoded on the sender's device (max 1280 px, WebP or JPEG, about 300 KB, EXIF/GPS stripped), relayed through the WebSocket in one frame (≤ 512 KB) and **never stored by the server**. Images from others are blurred until tapped. Relaying (rather than a peer-to-peer DataChannel) is deliberate: it works on networks where P2P fails without TURN.
+
+### Group voice
+
+Full-mesh WebRTC audio (≤ 8 per room) using perfect negotiation, echo cancellation, noise suppression, ICE restart on network change and speaking detection. Audio flows directly between devices; the server only relays signalling. Without a TURN server some calls between two mobile networks will not connect. Set `TURN_URLS` and credentials to fix that.
 
 Rate limits are token buckets enforced **both per connection and per public key** (frames, chat, room creation, joins, profile changes), so opening more sockets does not multiply throughput.
 

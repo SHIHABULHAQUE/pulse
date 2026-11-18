@@ -1,7 +1,7 @@
 import { createVerify, randomBytes, randomUUID } from 'node:crypto';
 import {
-  LIMITS, decodeClient, encode,
-  type ClientMessage, type ErrorCode, type Presence, type ServerMessage, type Status
+  LIMITS, bodyKind, decodeClient, encode,
+  type ClientMessage, type ErrorCode, type IceServer, type Presence, type ServerMessage, type Status, type VoiceParticipant
 } from '@pulse/protocol';
 import { KeyedLimiter, connectionLimits, keyLimits, type Action } from './rateLimit.js';
 import { LOBBY_ID, RoomRegistry } from './rooms.js';
@@ -28,6 +28,9 @@ type Session = {
   ready: boolean;
   resumeToken: string;
   lastSendByRoom: Map<string, number>;
+  /** Room whose voice channel this session is in (one at a time). */
+  voiceRoom: string | null;
+  muted: boolean;
 };
 
 /** What survives a dropped connection for the resume grace period. */
@@ -40,7 +43,10 @@ export const metrics = {
   invalidMessagesTotal: 0,
   authFailuresTotal: 0,
   resumesTotal: 0,
-  droppedBackpressureTotal: 0
+  droppedBackpressureTotal: 0,
+  imagesRelayedTotal: 0,
+  voiceJoinsTotal: 0,
+  signalsRelayedTotal: 0
 };
 
 export class Hub {
@@ -49,7 +55,7 @@ export class Hub {
   private readonly connLimiter = new KeyedLimiter<Action>(connectionLimits);
   private readonly keyLimiter = new KeyedLimiter<Action>(keyLimits);
 
-  constructor(readonly rooms: RoomRegistry, private readonly opts: { maxBufferedBytes: number; log: Logger; now?: () => number }) {}
+  constructor(readonly rooms: RoomRegistry, private readonly opts: { maxBufferedBytes: number; log: Logger; now?: () => number; iceServers?: (label: string) => IceServer[] }) {}
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
@@ -60,7 +66,7 @@ export class Hub {
     const challenge = randomBytes(32).toString('base64url');
     const session: Session = {
       id: randomUUID(), conn, publicKey: '', handle: '', status: 'online', rooms: new Set(), challenge,
-      challengeExpiresAt: this.now() + LIMITS.challengeTtlMs, ready: false, resumeToken: '', lastSendByRoom: new Map()
+      challengeExpiresAt: this.now() + LIMITS.challengeTtlMs, ready: false, resumeToken: '', lastSendByRoom: new Map(), voiceRoom: null, muted: false
     };
     this.sessions.set(session.id, session);
     this.send(session, { type: 'server.challenge', requestId: 'handshake', payload: { challenge, expiresAt: session.challengeExpiresAt } });
@@ -70,6 +76,7 @@ export class Hub {
   disconnect(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+    this.leaveVoice(session, 'disconnect');
     this.sessions.delete(sessionId);
     if (!session.ready) return;
     this.parked.set(session.resumeToken, { publicKey: session.publicKey, handle: session.handle, status: session.status, rooms: [...session.rooms], expiresAt: this.now() + LIMITS.resumeGraceMs });
@@ -166,17 +173,20 @@ export class Hub {
       case 'room.create': {
         if (this.limited(session, 'roomCreate', message.requestId)) return;
         if (session.rooms.size >= LIMITS.roomsPerSession) { this.error(session, message.requestId, 'TOO_MANY_ROOMS', `You can be in at most ${LIMITS.roomsPerSession} rooms`); return; }
-        const room = this.rooms.create(message.payload, session.publicKey);
-        this.joinRoom(session, room.id, message.requestId);
+        const { lock, ...settings } = message.payload;
+        const room = this.rooms.create(settings, session.publicKey, lock);
+        this.joinRoom(session, room.id, message.requestId, lock?.proof);
         return;
       }
       case 'room.join':
         if (this.limited(session, 'join', message.requestId)) return;
-        this.joinRoom(session, message.payload.roomId, message.requestId);
+        this.joinRoom(session, message.payload.roomId, message.requestId, message.payload.proof);
         return;
       case 'room.leave': {
         const { roomId } = message.payload;
-        if (!session.rooms.delete(roomId)) return;
+        if (!session.rooms.has(roomId)) return;
+        if (session.voiceRoom === roomId) this.leaveVoice(session, message.requestId);
+        session.rooms.delete(roomId);
         this.rooms.removeMember(roomId, session.id);
         this.send(session, { type: 'room.left', requestId: message.requestId, payload: { roomId } });
         this.broadcastRoom(roomId);
@@ -191,11 +201,16 @@ export class Hub {
         return;
       }
       case 'chat.send': {
-        const { roomId, text, clientMessageId } = message.payload;
+        const { roomId, text, image, enc, clientMessageId } = message.payload;
         if (!session.rooms.has(roomId)) { this.error(session, message.requestId, 'NOT_IN_ROOM', 'Join the room before sending'); return; }
-        if (this.limited(session, 'chat', message.requestId)) return;
         const room = this.rooms.view(roomId);
         if (!room) { this.error(session, message.requestId, 'ROOM_NOT_FOUND', 'Room no longer exists'); return; }
+        const kind = bodyKind(message.payload);
+        if (!kind) { this.error(session, message.requestId, 'INVALID_MESSAGE', 'A message needs text, an image, or ciphertext (not plaintext and ciphertext together)'); return; }
+        // Locked rooms are end-to-end encrypted: refuse plaintext so a buggy client can't leak it. Open rooms stay plaintext so they can be moderated.
+        if (room.locked !== (kind === 'encrypted')) { this.error(session, message.requestId, 'ENCRYPTION_REQUIRED', room.locked ? 'This room is end-to-end encrypted' : 'Open rooms do not accept encrypted messages'); return; }
+        const heavy = !!image || (enc ? enc.ct.length > 8_000 : false);
+        if (this.limited(session, heavy ? 'media' : 'chat', message.requestId)) return;
         const now = this.now();
         if (room.slowModeSec > 0 && room.ownerKey !== session.publicKey) {
           const last = session.lastSendByRoom.get(roomId) ?? 0;
@@ -205,7 +220,43 @@ export class Hub {
         }
         this.rooms.touch(roomId);
         metrics.messagesRelayedTotal += 1;
-        this.broadcastToRoom(roomId, { type: 'chat.message', requestId: message.requestId, payload: { id: randomUUID(), clientMessageId, roomId, text, author: { publicKey: session.publicKey, handle: session.handle }, sentAt: now } });
+        if (heavy) metrics.imagesRelayedTotal += 1;
+        const body = kind === 'encrypted' ? { text: '', enc } : { text, ...(image ? { image } : {}) };
+        this.broadcastToRoom(roomId, { type: 'chat.message', requestId: message.requestId, payload: { id: randomUUID(), clientMessageId, roomId, ...body, author: { publicKey: session.publicKey, handle: session.handle }, sentAt: now } });
+        return;
+      }
+      case 'voice.join': {
+        if (this.limited(session, 'voice', message.requestId)) return;
+        const { roomId, muted } = message.payload;
+        const room = this.rooms.view(roomId);
+        if (!room || !session.rooms.has(roomId)) { this.error(session, message.requestId, 'NOT_IN_ROOM', 'Join the room first'); return; }
+        if (room.mode === 'text') { this.error(session, message.requestId, 'VOICE_DISABLED', 'This room is text only'); return; }
+        if (session.voiceRoom === roomId) return;
+        if (this.voiceParticipants(roomId).length >= LIMITS.voicePerRoom) { this.error(session, message.requestId, 'VOICE_FULL', 'Voice is full (' + LIMITS.voicePerRoom + ' people max)'); return; }
+        if (session.voiceRoom) this.leaveVoice(session, message.requestId);
+        session.voiceRoom = roomId;
+        session.muted = muted;
+        metrics.voiceJoinsTotal += 1;
+        this.send(session, { type: 'voice.joined', requestId: message.requestId, payload: { roomId, sessionId: session.id, iceServers: this.opts.iceServers?.(session.id.slice(0, 8)) ?? [] } });
+        this.broadcastVoice(roomId);
+        return;
+      }
+      case 'voice.leave':
+        this.leaveVoice(session, message.requestId);
+        return;
+      case 'voice.mute':
+        if (!session.voiceRoom) return;
+        session.muted = message.payload.muted;
+        this.broadcastVoice(session.voiceRoom);
+        return;
+      case 'rtc.signal': {
+        if (this.limited(session, 'signal', message.requestId)) return;
+        const { to, ...data } = message.payload;
+        const peer = this.sessions.get(to);
+        // Only relay between two sessions in the same voice channel: no arbitrary session-to-session messaging.
+        if (!session.voiceRoom || !peer || peer.voiceRoom !== session.voiceRoom || peer.id === session.id) { this.error(session, message.requestId, 'NOT_IN_VOICE', 'That person is not in your voice channel'); return; }
+        metrics.signalsRelayedTotal += 1;
+        this.send(peer, { type: 'rtc.signal', requestId: 'rtc', payload: { ...data, from: session.id } });
         return;
       }
     }
@@ -254,16 +305,40 @@ export class Hub {
     } catch { return false; }
   }
 
-  private joinRoom(session: Session, roomId: string, requestId: string): void {
+  /* ---------------------------------------------------------------- voice */
+
+  voiceParticipants(roomId: string): VoiceParticipant[] {
+    const out: VoiceParticipant[] = [];
+    for (const s of this.sessions.values()) if (s.ready && s.voiceRoom === roomId) out.push({ sessionId: s.id, publicKey: s.publicKey, handle: s.handle, muted: s.muted });
+    return out;
+  }
+
+  /** Everyone in the room sees who is in its voice channel (so they can see it's active before joining). */
+  private broadcastVoice(roomId: string): void {
+    this.broadcastToRoom(roomId, { type: 'voice.state', requestId: 'voice', payload: { roomId, participants: this.voiceParticipants(roomId) } });
+  }
+
+  private leaveVoice(session: Session, requestId: string): void {
+    const roomId = session.voiceRoom;
+    if (!roomId) return;
+    session.voiceRoom = null;
+    session.muted = false;
+    this.send(session, { type: 'voice.left', requestId, payload: { roomId } });
+    this.broadcastVoice(roomId);
+  }
+
+  private joinRoom(session: Session, roomId: string, requestId: string, proof?: string): void {
     const room = this.rooms.view(roomId);
     if (!room) { this.error(session, requestId, 'ROOM_NOT_FOUND', 'Room not found'); return; }
     if (!session.rooms.has(roomId)) {
+      if (!this.rooms.checkProof(roomId, proof)) { this.error(session, requestId, 'BAD_PASSWORD', proof ? 'Wrong password' : 'This room needs a password'); return; }
       if (session.rooms.size >= LIMITS.roomsPerSession) { this.error(session, requestId, 'TOO_MANY_ROOMS', `You can be in at most ${LIMITS.roomsPerSession} rooms`); return; }
       if (room.members >= room.memberCap) { this.error(session, requestId, 'ROOM_FULL', 'This room is full'); return; }
       session.rooms.add(roomId);
       this.rooms.addMember(roomId, session.id);
     }
     this.send(session, { type: 'room.joined', requestId, payload: this.rooms.view(roomId)! });
+    this.send(session, { type: 'voice.state', requestId: 'voice', payload: { roomId, participants: this.voiceParticipants(roomId) } });
     this.broadcastRoom(roomId);
     this.broadcastPresence();
   }

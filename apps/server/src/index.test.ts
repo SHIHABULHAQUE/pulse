@@ -230,3 +230,122 @@ describe('hub', () => {
     expect(a.conn.out.filter((m) => m.type === 'server.error' && m.payload.code === 'INVALID_MESSAGE')).toHaveLength(2);
   });
 });
+
+describe('locked rooms, images and voice', () => {
+  let t: number;
+  let hub: Hub;
+  const log = { info: () => undefined, warn: () => undefined };
+  beforeEach(() => {
+    t = 1_000_000;
+    hub = new Hub(new RoomRegistry({ dataDir: null, idleMs: 60_000, debounceMs: 0, now: () => t }), { maxBufferedBytes: 10_000_000, log, now: () => t, iceServers: () => [{ urls: 'stun:example.org' }] });
+  });
+  const send = (id: string, m: ClientMessage) => hub.handle(id, encode(m));
+  function login(handle: string) {
+    const conn = new FakeConn();
+    const id = hub.connect(conn);
+    const who = identity();
+    send(id, { type: 'client.hello', requestId: 'h', payload: { publicKey: who.pub, signature: sign(who.key, conn.last('server.challenge')!.payload.challenge), handle } });
+    return { conn, id };
+  }
+  const settings = { name: 'Secret', topic: '', emoji: '#', mode: 'both' as const, memberCap: 10, slowModeSec: 0, rules: '' };
+  const lock = { salt: 'c2FsdHNhbHRzYWx0c2FsdA', proof: 'cHJvb2Zwcm9vZnByb29mcHJvb2Zwcm9vZnByb29mcHI' };
+  const enc = { iv: 'aXZpdml2aXZpdml2', ct: 'Y2lwaGVydGV4dA' };
+  const image = { mime: 'image/webp' as const, data: 'UklGRg', width: 10, height: 10 };
+
+  it('requires the right password proof to join a locked room and never exposes the verifier', () => {
+    const owner = login('owner');
+    send(owner.id, { type: 'room.create', requestId: 'c', payload: { ...settings, lock } });
+    const room = owner.conn.last('room.joined')!.payload;
+    expect(room).toMatchObject({ locked: true, keySalt: lock.salt });
+    expect(JSON.stringify(room)).not.toContain(lock.proof);
+    expect(room).not.toHaveProperty('passwordHash');
+    const guest = login('guest');
+    send(guest.id, { type: 'room.join', requestId: 'j1', payload: { roomId: room.id } });
+    expect(guest.conn.last('server.error')?.payload.code).toBe('BAD_PASSWORD');
+    send(guest.id, { type: 'room.join', requestId: 'j2', payload: { roomId: room.id, proof: 'd3Jvbmd3cm9uZ3dyb25nd3Jvbmd3cm9uZ3dyb25nd3I' } });
+    expect(guest.conn.last('server.error')?.payload.message).toBe('Wrong password');
+    send(guest.id, { type: 'room.join', requestId: 'j3', payload: { roomId: room.id, proof: lock.proof } });
+    expect(guest.conn.last('room.joined')?.payload.id).toBe(room.id);
+  });
+
+  it('refuses plaintext in locked rooms and ciphertext in open rooms, and relays ciphertext untouched', () => {
+    const owner = login('owner');
+    send(owner.id, { type: 'room.create', requestId: 'c', payload: { ...settings, lock } });
+    const room = owner.conn.last('room.joined')!.payload;
+    send(owner.id, { type: 'chat.send', requestId: 'p', payload: { roomId: room.id, text: 'oops plaintext', clientMessageId: 'a' } });
+    expect(owner.conn.last('server.error')?.payload.code).toBe('ENCRYPTION_REQUIRED');
+    send(owner.id, { type: 'chat.send', requestId: 'e', payload: { roomId: room.id, text: '', enc, clientMessageId: 'b' } });
+    expect(owner.conn.last('chat.message')?.payload).toMatchObject({ text: '', enc });
+    send(owner.id, { type: 'room.join', requestId: 'l', payload: { roomId: 'lobby' } });
+    send(owner.id, { type: 'chat.send', requestId: 'e2', payload: { roomId: 'lobby', text: '', enc, clientMessageId: 'c' } });
+    expect(owner.conn.last('server.error')?.payload.code).toBe('ENCRYPTION_REQUIRED');
+  });
+
+  it('relays image messages, rejects empty ones, and rate limits image floods', () => {
+    const a = login('ana');
+    send(a.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    send(a.id, { type: 'chat.send', requestId: 'x', payload: { roomId: 'lobby', text: '   ', clientMessageId: 'empty' } });
+    expect(a.conn.last('server.error')?.payload.code).toBe('INVALID_MESSAGE');
+    send(a.id, { type: 'chat.send', requestId: 'i', payload: { roomId: 'lobby', text: 'look', image, clientMessageId: 'img0' } });
+    expect(a.conn.last('chat.message')?.payload.image).toEqual(image);
+    for (let n = 1; n < 10; n++) send(a.id, { type: 'chat.send', requestId: 'i' + n, payload: { roomId: 'lobby', text: '', image, clientMessageId: 'img' + n } });
+    expect(a.conn.out.some((m) => m.type === 'server.error' && m.payload.code === 'RATE_LIMITED')).toBe(true);
+  });
+
+  it('voice: join gives ICE servers, state is shared with the room, text-only rooms refuse', () => {
+    const a = login('ana');
+    const b = login('ben');
+    send(a.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    send(b.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    send(a.id, { type: 'voice.join', requestId: 'v', payload: { roomId: 'lobby', muted: false } });
+    expect(a.conn.last('voice.joined')?.payload).toMatchObject({ roomId: 'lobby', sessionId: a.id, iceServers: [{ urls: 'stun:example.org' }] });
+    expect(b.conn.last('voice.state')?.payload.participants.map((p) => p.handle)).toEqual(['ana']);
+    send(a.id, { type: 'voice.mute', requestId: 'm', payload: { muted: true } });
+    expect(b.conn.last('voice.state')?.payload.participants[0].muted).toBe(true);
+    send(a.id, { type: 'room.create', requestId: 'c', payload: { ...settings, mode: 'text' } });
+    const textRoom = a.conn.last('room.joined')!.payload;
+    send(a.id, { type: 'voice.join', requestId: 'v2', payload: { roomId: textRoom.id, muted: false } });
+    expect(a.conn.last('server.error')?.payload.code).toBe('VOICE_DISABLED');
+  });
+
+  it('relays WebRTC signals only between two sessions in the same voice channel', () => {
+    const a = login('ana');
+    const b = login('ben');
+    const c = login('cat');
+    for (const s of [a, b, c]) send(s.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    send(a.id, { type: 'voice.join', requestId: 'v', payload: { roomId: 'lobby', muted: false } });
+    send(a.id, { type: 'rtc.signal', requestId: 's0', payload: { to: b.id, description: { type: 'offer', sdp: 'v=0' } } });
+    expect(a.conn.last('server.error')?.payload.code).toBe('NOT_IN_VOICE');
+    send(b.id, { type: 'voice.join', requestId: 'v', payload: { roomId: 'lobby', muted: false } });
+    send(a.id, { type: 'rtc.signal', requestId: 's1', payload: { to: b.id, description: { type: 'offer', sdp: 'v=0' } } });
+    expect(b.conn.last('rtc.signal')?.payload).toMatchObject({ from: a.id, description: { type: 'offer', sdp: 'v=0' } });
+    send(c.id, { type: 'rtc.signal', requestId: 's2', payload: { to: a.id, candidate: { candidate: 'x' } } });
+    expect(c.conn.last('server.error')?.payload.code).toBe('NOT_IN_VOICE');
+    hub.disconnect(b.id);
+    expect(a.conn.last('voice.state')?.payload.participants.map((p) => p.handle)).toEqual(['ana']);
+  });
+
+  it('caps voice channels at the mesh limit', () => {
+    const people = Array.from({ length: 9 }, (_, i) => login('p' + i));
+    for (const p of people) {
+      send(p.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+      send(p.id, { type: 'voice.join', requestId: 'v', payload: { roomId: 'lobby', muted: false } });
+    }
+    expect(people[8].conn.last('server.error')?.payload.code).toBe('VOICE_FULL');
+  });
+});
+
+describe('TURN credentials', () => {
+  it('issues expiring HMAC credentials with a shared secret and never leaks the secret', async () => {
+    const { iceServersFor } = await import('./turn');
+    const { createHmac } = await import('node:crypto');
+    const cfg = { stunUrls: ['stun:s'], turnUrls: ['turn:t:3478'], turnSecret: 'sekret', turnUsername: '', turnCredential: '', turnTtlSec: 3600 };
+    const [stun, turn] = iceServersFor('abc', cfg, 1_000_000);
+    expect(stun).toEqual({ urls: ['stun:s'] });
+    expect(turn.username).toBe('4600:abc');
+    expect(turn.credential).toBe(createHmac('sha1', 'sekret').update('4600:abc').digest('base64'));
+    expect(JSON.stringify(turn)).not.toContain('sekret');
+    expect(iceServersFor('x', { ...cfg, turnSecret: '', turnUsername: 'u', turnCredential: 'p' })[1]).toMatchObject({ username: 'u', credential: 'p' });
+    expect(iceServersFor('x', { ...cfg, turnSecret: '' })).toHaveLength(1);
+  });
+});

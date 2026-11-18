@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Presence, Room } from '@pulse/protocol';
+import type { Presence, Room, VoiceParticipant } from '@pulse/protocol';
 import { DEFAULT_SETTINGS, type JoinedRoom, type LocalMessage, type Profile, type Settings, type StoredIdentity } from './lib/db';
 
 export type ConnState = 'connecting' | 'online' | 'offline';
@@ -18,6 +18,13 @@ type State = {
   messages: Record<string, LocalMessage[]>;
   toasts: Toast[];
   dialog: DialogName;
+  /** The voice channel this device is in. */
+  voice: { roomId: string; muted: boolean; connecting: boolean; selfId: string | null } | null;
+  /** Who is in each room's voice channel (for rooms we're members of). */
+  voiceRooms: Record<string, VoiceParticipant[]>;
+  /** sessionId (or "self") → currently speaking. */
+  speaking: Record<string, boolean>;
+  peerStates: Record<string, RTCPeerConnectionState>;
   set: (partial: Partial<State> | ((s: State) => Partial<State>)) => void;
 };
 
@@ -33,6 +40,10 @@ export const usePulse = create<State>((set) => ({
   messages: {},
   toasts: [],
   dialog: null,
+  voice: null,
+  voiceRooms: {},
+  speaking: {},
+  peerStates: {},
   set: (partial) => set(partial)
 }));
 

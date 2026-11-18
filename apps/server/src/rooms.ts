@@ -1,17 +1,25 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { RoomSchema, RoomSettingsSchema, type Room, type RoomSettings } from '@pulse/protocol';
 
+/** scrypt(proof). The proof is itself PBKDF2(password), so neither the password nor the room key ever reach the server. */
+const PasswordHashSchema = z.object({ salt: z.string().max(64), hash: z.string().max(128) });
+type PasswordHash = z.infer<typeof PasswordHashSchema>;
+
 /** Room definition without live membership. Only this (for pinned public rooms) is ever written to disk. */
-type RoomDef = Omit<Room, 'members'> & { lastActiveAt: number };
+type RoomDef = Omit<Room, 'members'> & { lastActiveAt: number; passwordHash: PasswordHash | null };
 
 const SnapshotSchema = z.object({
   version: z.literal(1),
-  rooms: z.array(RoomSchema.omit({ members: true }))
+  rooms: z.array(RoomSchema.omit({ members: true }).extend({ passwordHash: PasswordHashSchema.nullable().default(null) }))
 });
+
+function hashProof(proof: string, salt = randomBytes(16).toString('base64url')): PasswordHash {
+  return { salt, hash: scryptSync(proof, salt, 32).toString('base64url') };
+}
 
 export const LOBBY_ID = 'lobby';
 
@@ -28,7 +36,7 @@ export class RoomRegistry {
 
   constructor(private readonly opts: { dataDir: string | null; idleMs: number; debounceMs: number; now?: () => number; onError?: (err: unknown) => void }) {
     const now = this.now();
-    this.defs.set(LOBBY_ID, { id: LOBBY_ID, name: 'Lobby', topic: 'A public room for everyone', emoji: '👋', mode: 'both', memberCap: 500, slowModeSec: 0, rules: 'Be kind. No spam. No personal info.', kind: 'public', ownerKey: null, pinned: true, createdAt: now, lastActiveAt: now });
+    this.defs.set(LOBBY_ID, { id: LOBBY_ID, name: 'Lobby', topic: 'A public room for everyone', emoji: '👋', mode: 'both', memberCap: 500, slowModeSec: 0, rules: 'Be kind. No spam. No personal info.', kind: 'public', ownerKey: null, pinned: true, locked: false, keySalt: null, passwordHash: null, createdAt: now, lastActiveAt: now });
   }
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
@@ -36,7 +44,7 @@ export class RoomRegistry {
   view(id: string): Room | null {
     const def = this.defs.get(id);
     if (!def) return null;
-    const { lastActiveAt: _l, ...room } = def;
+    const { lastActiveAt: _l, passwordHash: _p, ...room } = def;
     return { ...room, members: this.members.get(id)?.size ?? 0 };
   }
 
@@ -47,13 +55,24 @@ export class RoomRegistry {
 
   get size(): number { return this.defs.size; }
 
-  create(settings: RoomSettings, ownerKey: string): Room {
+  create(settings: RoomSettings, ownerKey: string, lock?: { salt: string; proof: string }): Room {
     const parsed = RoomSettingsSchema.parse(settings);
     let id = slugify(parsed.name);
     while (this.defs.has(id)) id = slugify(parsed.name);
     const now = this.now();
-    this.defs.set(id, { ...parsed, id, kind: 'public', ownerKey, pinned: false, createdAt: now, lastActiveAt: now });
+    this.defs.set(id, { ...parsed, id, kind: 'public', ownerKey, pinned: false, locked: !!lock, keySalt: lock?.salt ?? null, passwordHash: lock ? hashProof(lock.proof) : null, createdAt: now, lastActiveAt: now });
     return this.view(id)!;
+  }
+
+  /** True for open rooms; for locked rooms, a constant-time check of scrypt(proof). */
+  checkProof(id: string, proof: string | undefined): boolean {
+    const def = this.defs.get(id);
+    if (!def) return false;
+    if (!def.passwordHash) return true;
+    if (!proof) return false;
+    const expected = Buffer.from(def.passwordHash.hash, 'base64url');
+    const actual = Buffer.from(hashProof(proof, def.passwordHash.salt).hash, 'base64url');
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
   memberCount(id: string): number { return this.members.get(id)?.size ?? 0; }
@@ -133,6 +152,7 @@ export class RoomRegistry {
     if (!file) return;
     if (this.snapshotTimer) { clearTimeout(this.snapshotTimer); this.snapshotTimer = null; }
     await mkdir(this.opts.dataDir!, { recursive: true });
+    // Locked rooms keep only scrypt(proof): enough to check joins, useless for reading messages.
     const rooms = [...this.defs.values()].filter((d) => d.pinned && d.kind === 'public' && d.id !== LOBBY_ID).map(({ lastActiveAt: _l, ...def }) => def);
     const tmp = `${file}.tmp`;
     await writeFile(tmp, JSON.stringify({ version: 1, rooms }, null, 2), 'utf8');

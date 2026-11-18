@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClientMessageSchema, EXPORT_FORMAT, EXPORT_VERSION, RoomSettingsSchema, decodeClient, decodeServer, encode, migrateExport } from './index';
+import { ClientMessageSchema, EXPORT_FORMAT, EXPORT_VERSION, RoomSettingsSchema, bodyKind, decodeClient, decodeServer, encode, migrateExport } from './index';
 
 const key = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuXV9LIpywPEYCB4ALQFJ3FffHJeBowoiWThTuGX';
 
@@ -22,10 +22,22 @@ describe('protocol codec', () => {
     expect(() => decodeClient(encode({ type: 'admin.shutdown', requestId: 'r' } as never))).toThrow();
   });
 
-  it('rejects oversized and empty chat text', () => {
-    const base = { type: 'chat.send', requestId: 'x', payload: { roomId: 'lobby', clientMessageId: 'm', text: '' } };
+  it('rejects oversized chat text and oversized images', () => {
+    const base = { type: 'chat.send', requestId: 'x', payload: { roomId: 'lobby', clientMessageId: 'm', text: 'x'.repeat(4001) } };
     expect(() => ClientMessageSchema.parse(base)).toThrow();
-    expect(() => ClientMessageSchema.parse({ ...base, payload: { ...base.payload, text: 'x'.repeat(4001) } })).toThrow();
+    const image = { mime: 'image/webp', data: 'A'.repeat(500_000), width: 10, height: 10 };
+    expect(() => ClientMessageSchema.parse({ ...base, payload: { ...base.payload, text: '', image } })).toThrow();
+    expect(() => ClientMessageSchema.parse({ ...base, payload: { ...base.payload, text: '', image: { ...image, mime: 'image/svg+xml', data: 'AAAA' } } })).toThrow();
+  });
+
+  it('classifies message bodies: plain, encrypted, or invalid', () => {
+    const image = { mime: 'image/webp' as const, data: 'AAAA', width: 1, height: 1 };
+    const enc = { iv: 'A'.repeat(16), ct: 'AAAA' };
+    expect(bodyKind({ text: 'hi' })).toBe('plain');
+    expect(bodyKind({ text: '', image })).toBe('plain');
+    expect(bodyKind({ text: '', enc })).toBe('encrypted');
+    expect(bodyKind({ text: '  ' })).toBeNull();
+    expect(bodyKind({ text: 'leak', enc })).toBeNull();
   });
 
   it('rejects invalid handles and room ids', () => {
@@ -34,7 +46,7 @@ describe('protocol codec', () => {
   });
 
   it('applies room setting defaults and bounds', () => {
-    expect(RoomSettingsSchema.parse({ name: 'Cafe' })).toMatchObject({ mode: 'text', memberCap: 100, slowModeSec: 0 });
+    expect(RoomSettingsSchema.parse({ name: 'Cafe' })).toMatchObject({ mode: 'both', memberCap: 100, slowModeSec: 0 });
     expect(() => RoomSettingsSchema.parse({ name: 'x', memberCap: 10_000 })).toThrow();
   });
 });

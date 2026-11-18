@@ -23,8 +23,8 @@ export function PeoplePanel() {
         {people.length === 0 && <li className="muted">Nobody else is here right now.</li>}
       </ul>
       <div className="call-card">
-        <span aria-hidden="true">▣</span>
-        <div><strong>Voice &amp; video</strong><p>Calls are coming in the next phase.</p></div>
+        <span aria-hidden="true">🔊</span>
+        <div><strong>Group voice</strong><p>Rooms with voice have a Join voice button above the chat. Audio goes directly between devices.</p></div>
       </div>
     </aside>
   );

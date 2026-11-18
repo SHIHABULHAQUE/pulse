@@ -8,3 +8,10 @@ services:
     envVars:
       - key: ALLOWED_ORIGINS
         sync: false   # set to https://your-domain after attaching it
+      # Optional TURN relay for voice on strict mobile networks (e.g. a hosted TURN service):
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_CREDENTIAL
+        sync: false

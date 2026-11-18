@@ -1,10 +1,12 @@
-import { decodeServer, encode, type ClientMessage, type RoomSettings, type ServerMessage, type Status } from '@pulse/protocol';
+import { decodeServer, encode, type ClientMessage, type ImageAttachment, type RoomSettings, type ServerMessage, type Status } from '@pulse/protocol';
 import { toast, upsertRoom, usePulse } from '../store';
 import {
   DEFAULT_SETTINGS, HISTORY_LIMIT, getKv, outboxItems, putMessage, queueOutbox, removeOutbox, roomMessages, setKv,
   type JoinedRoom, type LocalMessage, type Settings
 } from './db';
 import { loadIdentity, signChallenge } from './identity';
+import { decryptBody, deriveRoomSecret, encryptBody, newSalt, type RoomSecret } from './roomCrypto';
+import { onReconnected, onSignal, onVoiceJoined, onVoiceLeft, onVoiceState } from './voice';
 
 const RESUME_KEY = 'pulse.resume';
 const store = () => usePulse.getState();
@@ -16,6 +18,10 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let booted = false;
 /** Chat sends awaiting their server echo on the current socket. */
 const inFlight = new Set<string>();
+/** Password-derived secrets for joins/creates in flight, keyed by requestId. Saved with the room once the server confirms. */
+const pendingSecrets = new Map<string, RoomSecret>();
+
+const secretFor = (roomId: string): RoomSecret | undefined => store().joined.find((r) => r.id === roomId)?.secret;
 
 function wsUrl(): string {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
@@ -105,12 +111,27 @@ async function onMessage(socket: WebSocket, message: ServerMessage): Promise<voi
       sessionStorage.setItem(RESUME_KEY, message.payload.resumeToken);
       s.set({ conn: 'online', directory: message.payload.rooms });
       const already = new Set(message.payload.joinedRooms);
-      const wanted = s.joined.length > 0 ? s.joined.map((r) => r.id) : ['lobby'];
-      for (const id of wanted) if (!already.has(id)) send({ type: 'room.join', requestId: `rejoin:${id}`, payload: { roomId: id } });
+      const wanted = s.joined.length > 0 ? s.joined : [{ id: 'lobby', secret: undefined }];
+      for (const room of wanted) {
+        if (!already.has(room.id)) send({ type: 'room.join', requestId: `rejoin:${room.id}`, payload: { roomId: room.id, ...(room.secret ? { proof: room.secret.proof } : {}) } });
+      }
       if (s.profile && s.profile.status !== 'online') send({ type: 'presence.update', requestId: 'status', payload: { status: s.profile.status } });
+      onReconnected();
       void flushOutbox();
       return;
     }
+    case 'voice.joined':
+      onVoiceJoined(message.payload);
+      return;
+    case 'voice.left':
+      onVoiceLeft(message.payload);
+      return;
+    case 'voice.state':
+      onVoiceState(message.payload);
+      return;
+    case 'rtc.signal':
+      onSignal(message.payload);
+      return;
     case 'room.listed':
       s.set({ directory: message.payload.rooms });
       return;
@@ -127,14 +148,17 @@ async function onMessage(socket: WebSocket, message: ServerMessage): Promise<voi
     case 'room.joined': {
       const room = message.payload;
       s.set((st) => ({ directory: upsertRoom(st.directory, room) }));
+      const secret = pendingSecrets.get(message.requestId);
+      pendingSecrets.delete(message.requestId);
       if (!s.joined.some((r) => r.id === room.id)) {
-        const entry: JoinedRoom = { id: room.id, name: room.name, owned: room.ownerKey === s.identity?.publicKeySpki, joinedAt: Date.now() };
+        const entry: JoinedRoom = { id: room.id, name: room.name, owned: room.ownerKey === s.identity?.publicKeySpki, joinedAt: Date.now(), ...(secret ? { secret } : {}) };
         const joined = [...s.joined, entry];
         s.set({ joined });
         await setKv('rooms', joined);
         await loadRoomHistory(room.id);
       }
-      if (message.requestId.startsWith('user:') || !store().activeRoom) s.set({ activeRoom: room.id });
+      if (message.requestId.startsWith('user:')) s.set({ activeRoom: room.id, dialog: null });
+      else if (!store().activeRoom) s.set({ activeRoom: room.id });
       void flushOutbox();
       return;
     }
@@ -172,10 +196,12 @@ async function onError(requestId: string, { code, message, retryAfterMs }: Extra
     updateMessage(cmid, (m) => ({ ...m, state: 'failed', error: message }));
     return;
   }
-  if (requestId.startsWith('rejoin:') && (code === 'ROOM_NOT_FOUND' || code === 'ROOM_FULL')) {
+  if (requestId.startsWith('rejoin:') && (code === 'ROOM_NOT_FOUND' || code === 'ROOM_FULL' || code === 'BAD_PASSWORD')) {
     await forgetRoom(requestId.slice(7));
     return;
   }
+  pendingSecrets.delete(requestId);
+  if (requestId.startsWith('voice:')) usePulse.getState().set({ voice: null });
   toast(message, 'error');
 }
 
@@ -195,7 +221,18 @@ function updateMessage(clientMessageId: string, fn: (m: LocalMessage) => LocalMe
 }
 
 async function receiveChat(payload: Extract<ServerMessage, { type: 'chat.message' }>['payload']): Promise<void> {
-  const message: LocalMessage = { ...payload, state: 'sent' };
+  const { enc, image, text, ...meta } = payload;
+  let body: { text: string; image?: ImageAttachment } = { text, ...(image ? { image } : {}) };
+  if (enc) {
+    const secret = secretFor(payload.roomId);
+    try {
+      if (!secret) throw new Error('no key');
+      body = await decryptBody(secret, payload.roomId, enc);
+    } catch {
+      body = { text: '🔒 Could not decrypt this message' };
+    }
+  }
+  const message: LocalMessage = { ...meta, ...body, ...(enc ? { encrypted: true } : {}), state: 'sent' };
   inFlight.delete(payload.clientMessageId);
   await removeOutbox(payload.clientMessageId);
   await putMessage(message);
@@ -214,40 +251,71 @@ async function flushOutbox(): Promise<void> {
   const joined = new Set(store().joined.map((r) => r.id));
   for (const item of await outboxItems()) {
     if (inFlight.has(item.clientMessageId) || !joined.has(item.roomId)) continue;
-    if (send({ type: 'chat.send', requestId: `chat:${item.clientMessageId}`, payload: { roomId: item.roomId, text: item.text, clientMessageId: item.clientMessageId } })) inFlight.add(item.clientMessageId);
+    const secret = secretFor(item.roomId);
+    const body = secret
+      ? { text: '', enc: await encryptBody(secret, item.roomId, { text: item.text, ...(item.image ? { image: item.image } : {}) }) }
+      : { text: item.text, ...(item.image ? { image: item.image } : {}) };
+    if (inFlight.has(item.clientMessageId)) continue; // a concurrent flush got here first while we were encrypting
+    if (send({ type: 'chat.send', requestId: `chat:${item.clientMessageId}`, payload: { roomId: item.roomId, clientMessageId: item.clientMessageId, ...body } })) inFlight.add(item.clientMessageId);
   }
 }
 
-/** Optimistic send: stored locally and queued; delivered now or when back online. */
-export async function sendChat(roomId: string, text: string): Promise<void> {
+/** Optimistic send: stored locally and queued; delivered now or when back online. Encrypted at send time in locked rooms. */
+export async function sendChat(roomId: string, text: string, image?: ImageAttachment): Promise<void> {
   const { identity, profile } = store();
-  if (!identity || !profile) return;
+  if (!identity || !profile || (!text.trim() && !image)) return;
   const clientMessageId = crypto.randomUUID();
-  const message: LocalMessage = { id: clientMessageId, clientMessageId, roomId, text, author: { publicKey: identity.publicKeySpki, handle: profile.handle }, sentAt: Date.now(), state: 'pending' };
+  const message: LocalMessage = { id: clientMessageId, clientMessageId, roomId, text, ...(image ? { image } : {}), ...(secretFor(roomId) ? { encrypted: true } : {}), author: { publicKey: identity.publicKeySpki, handle: profile.handle }, sentAt: Date.now(), state: 'pending' };
   await putMessage(message);
   store().set((st) => ({ messages: { ...st.messages, [roomId]: [...(st.messages[roomId] ?? []), message].slice(-HISTORY_LIMIT) } }));
-  await queueOutbox({ clientMessageId, roomId, text, queuedAt: Date.now() });
+  await queueOutbox({ clientMessageId, roomId, text, ...(image ? { image } : {}), queuedAt: Date.now() });
   void flushOutbox();
 }
 
 export async function retryMessage(m: LocalMessage): Promise<void> {
   updateMessage(m.clientMessageId, (x) => ({ ...x, state: 'pending', error: undefined }));
-  await queueOutbox({ clientMessageId: m.clientMessageId, roomId: m.roomId, text: m.text, queuedAt: Date.now() });
+  await queueOutbox({ clientMessageId: m.clientMessageId, roomId: m.roomId, text: m.text, ...(m.image ? { image: m.image } : {}), queuedAt: Date.now() });
   void flushOutbox();
 }
 
-export function joinRoom(roomId: string): void {
-  if (store().joined.some((r) => r.id === roomId)) { store().set({ activeRoom: roomId, dialog: null }); return; }
-  if (!send({ type: 'room.join', requestId: `user:${roomId}`, payload: { roomId } })) toast('You are offline', 'error');
-  store().set({ dialog: null });
+/**
+ * Join (or open) a room. Locked rooms need the password: it's turned into a join proof and a decryption key on this
+ * device. Returns false if a password is required but missing.
+ */
+export async function joinRoom(roomId: string, password?: string): Promise<boolean> {
+  if (store().joined.some((r) => r.id === roomId)) { store().set({ activeRoom: roomId, dialog: null }); return true; }
+  const room = store().directory.find((r) => r.id === roomId);
+  const requestId = `user:${roomId}:${crypto.randomUUID().slice(0, 8)}`;
+  let proof: string | undefined;
+  if (room?.locked) {
+    if (!password || !room.keySalt) return false;
+    const secret = await deriveRoomSecret(password, room.keySalt);
+    pendingSecrets.set(requestId, secret);
+    proof = secret.proof;
+  }
+  if (!send({ type: 'room.join', requestId, payload: { roomId, ...(proof ? { proof } : {}) } })) { pendingSecrets.delete(requestId); toast('You are offline', 'error'); return true; }
+  // Locked rooms keep the dialog open until the server accepts the password (room.joined closes it).
+  if (!room?.locked) store().set({ dialog: null });
+  return true;
 }
 
 export function leaveRoom(roomId: string): void {
   if (!send({ type: 'room.leave', requestId: `leave:${roomId}`, payload: { roomId } })) void forgetRoom(roomId);
 }
 
-export function createRoom(settings: RoomSettings): boolean {
-  return send({ type: 'room.create', requestId: `user:create:${crypto.randomUUID()}`, payload: settings });
+/** Creates a room; with a password it is locked and end-to-end encrypted. */
+export async function createRoom(settings: RoomSettings, password?: string): Promise<boolean> {
+  const requestId = `user:create:${crypto.randomUUID()}`;
+  let lock: { salt: string; proof: string } | undefined;
+  if (password) {
+    const salt = newSalt();
+    const secret = await deriveRoomSecret(password, salt);
+    pendingSecrets.set(requestId, secret);
+    lock = { salt, proof: secret.proof };
+  }
+  const ok = send({ type: 'room.create', requestId, payload: { ...settings, ...(lock ? { lock } : {}) } });
+  if (!ok) pendingSecrets.delete(requestId);
+  return ok;
 }
 
 export function pinRoom(roomId: string, pinned: boolean): void {

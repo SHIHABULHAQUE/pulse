@@ -49,21 +49,28 @@ export class KeyedLimiter<A extends string> {
   get size(): number { return this.buckets.size; }
 }
 
-export type Action = 'frame' | 'chat' | 'roomCreate' | 'join' | 'profile';
+export type Action = 'frame' | 'chat' | 'media' | 'roomCreate' | 'join' | 'profile' | 'voice' | 'signal';
 
+/** Call signalling bursts (ICE candidates for several peers at once), so the frame bucket is generous; content buckets are tight. */
 export const connectionLimits: Record<Action, BucketSpec> = {
-  frame: { capacity: 60, refillPerSec: 20 },
+  frame: { capacity: 400, refillPerSec: 60 },
   chat: { capacity: 10, refillPerSec: 2 },
+  media: { capacity: 4, refillPerSec: 1 / 5 },
   roomCreate: { capacity: 3, refillPerSec: 1 / 60 },
   join: { capacity: 20, refillPerSec: 2 },
-  profile: { capacity: 5, refillPerSec: 1 / 10 }
+  profile: { capacity: 5, refillPerSec: 1 / 10 },
+  voice: { capacity: 10, refillPerSec: 1 / 2 },
+  signal: { capacity: 300, refillPerSec: 60 }
 };
 
-/** Per-identity limits are a bit looser on burst but share the same rates, so many sockets per key don't multiply throughput. */
+/** Per-identity limits share the same rates, so opening many sockets does not multiply throughput. */
 export const keyLimits: Record<Action, BucketSpec> = {
-  frame: { capacity: 120, refillPerSec: 30 },
+  frame: { capacity: 800, refillPerSec: 100 },
   chat: { capacity: 15, refillPerSec: 2 },
+  media: { capacity: 6, refillPerSec: 1 / 5 },
   roomCreate: { capacity: 5, refillPerSec: 1 / 120 },
   join: { capacity: 40, refillPerSec: 3 },
-  profile: { capacity: 10, refillPerSec: 1 / 10 }
+  profile: { capacity: 10, refillPerSec: 1 / 10 },
+  voice: { capacity: 20, refillPerSec: 1 / 2 },
+  signal: { capacity: 600, refillPerSec: 100 }
 };

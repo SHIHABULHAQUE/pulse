@@ -198,3 +198,47 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   .chat-header { padding: 14px; flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+/* locked rooms */
+.lock-box { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin: 0; display: grid; gap: 8px; }
+.toggle { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; font-size: 12px; }
+.toggle input { margin-top: 3px; accent-color: var(--accent); }
+.toggle strong { display: block; font-size: 12px; }
+.toggle small { display: block; color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+.room-password { margin-top: 8px; }
+.voice-count { font-size: 10px; color: var(--muted); background: var(--hover); border-radius: 8px; padding: 2px 6px; flex: none; }
+.voice-count.me { color: var(--accent); background: var(--accent-soft); }
+
+/* images */
+.icon-button.attach { font-size: 18px; padding: 6px; align-self: center; }
+.composer { padding-left: 6px; }
+.attachment-preview { margin: 0 16px 8px; padding: 8px; border: 1px solid var(--border); border-radius: 12px; display: flex; gap: 10px; align-items: center; background: var(--input); }
+.attachment-preview img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; }
+.attachment-preview div { flex: 1; min-width: 0; }
+.attachment-preview strong { display: block; font-size: 12px; }
+.attachment-preview small { font-size: 11px; color: var(--muted); }
+.image-message { display: block; position: relative; margin-top: 6px; padding: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-width: min(360px, 100%); max-height: 360px; background: var(--input); cursor: zoom-in; }
+.image-message img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.image-message.blurred { cursor: pointer; }
+.image-message.blurred img { filter: blur(24px) saturate(.6); transform: scale(1.1); }
+.image-message .reveal { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; font-size: 12px; font-weight: 600; background: #0006; text-shadow: 0 1px 3px #000; }
+.image-full { display: block; max-width: 100%; max-height: 75vh; margin: 0 auto; border-radius: 10px; }
+.chat { position: relative; }
+.chat.dragging { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.drop-hint { position: absolute; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--panel-solid) 85%, transparent); font-weight: 700; color: var(--accent); pointer-events: none; }
+
+/* voice */
+.voice-bar { margin: 12px 24px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: var(--input); }
+.voice-bar.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft) inset; }
+.voice-info { display: flex; gap: 8px; align-items: center; }
+.voice-info strong { display: block; font-size: 12px; }
+.voice-info small { display: block; font-size: 11px; color: var(--muted); }
+.voice-icon { font-size: 18px; }
+.voice-people { list-style: none; margin: 0; padding: 0; display: flex; gap: 8px; flex: 1; flex-wrap: wrap; min-width: 0; }
+.voice-person { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+.voice-avatar { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 700; box-shadow: 0 0 0 2px transparent; transition: box-shadow .12s; }
+.voice-person.speaking .voice-avatar { box-shadow: 0 0 0 2px var(--accent), 0 0 12px var(--accent); }
+.voice-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-controls { display: flex; gap: 6px; margin-left: auto; }
+.ghost-button.on { border-color: var(--danger-border); color: var(--danger); }
+@media (max-width: 700px) { .voice-bar { margin: 10px 14px 0; } .voice-controls { margin-left: 0; width: 100%; } .voice-controls button { flex: 1; } }
