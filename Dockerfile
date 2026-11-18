@@ -14,15 +14,9 @@ RUN pnpm --filter @pulse/protocol build && pnpm --filter @pulse/server build && 
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=8080 HOST=0.0.0.0 DATA_DIR=/app/data WEB_DIST=/app/apps/web/dist
-# Same layout as the workspace so pnpm's symlinked node_modules resolve.
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/packages/protocol/package.json ./packages/protocol/package.json
-COPY --from=build /app/packages/protocol/dist ./packages/protocol/dist
-COPY --from=build /app/packages/protocol/node_modules ./packages/protocol/node_modules
-COPY --from=build /app/apps/server/package.json ./apps/server/package.json
-COPY --from=build /app/apps/server/dist ./apps/server/dist
-COPY --from=build /app/apps/server/node_modules ./apps/server/node_modules
-COPY --from=build /app/apps/web/dist ./apps/web/dist
+# Copy the built workspace whole: pnpm's node_modules are symlinks between packages,
+# so copying pieces separately can break module resolution.
+COPY --from=build /app /app
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 EXPOSE 8080
