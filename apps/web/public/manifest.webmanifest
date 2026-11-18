@@ -5,5 +5,13 @@
   "display": "standalone",
   "background_color": "#0d1117",
   "theme_color": "#0d1117",
-  "description": "Private, ephemeral realtime communication"
+  "description": "Private, ephemeral realtime communication",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
 }
