@@ -50,7 +50,7 @@ describe('room registry', () => {
     const b = r.create({ name: 'b', topic: '', emoji: '#', mode: 'text', memberCap: 10, slowModeSec: 0, rules: '' }, 'k'.repeat(44));
     r.setPinned(b.id, true);
     t = 5000;
-    expect(r.sweep()).toEqual([a.id]);
+    expect(r.sweep()).toEqual([{ id: a.id, kind: 'public' }]);
     expect(r.view(b.id)).not.toBeNull();
     expect(r.view('lobby')).not.toBeNull();
   });
@@ -347,5 +347,78 @@ describe('TURN credentials', () => {
     expect(JSON.stringify(turn)).not.toContain('sekret');
     expect(iceServersFor('x', { ...cfg, turnSecret: '', turnUsername: 'u', turnCredential: 'p' })[1]).toMatchObject({ username: 'u', credential: 'p' });
     expect(iceServersFor('x', { ...cfg, turnSecret: '' })).toHaveLength(1);
+  });
+});
+
+describe('private rooms', () => {
+  let hub: Hub;
+  const log = { info: () => undefined, warn: () => undefined };
+  beforeEach(() => { hub = new Hub(new RoomRegistry({ dataDir: null, idleMs: 60_000, debounceMs: 0 }), { maxBufferedBytes: 10_000_000, log }); });
+  const send = (id: string, m: ClientMessage) => hub.handle(id, encode(m));
+  function login(handle: string, resumeToken?: string, who = identity()) {
+    const conn = new FakeConn();
+    const id = hub.connect(conn);
+    send(id, { type: 'client.hello', requestId: 'h', payload: { publicKey: who.pub, signature: sign(who.key, conn.last('server.challenge')!.payload.challenge), handle, ...(resumeToken ? { resumeToken } : {}) } });
+    return { conn, id, who };
+  }
+  const settings = { name: 'Family', topic: '', emoji: '#', mode: 'both' as const, memberCap: 10, slowModeSec: 0, rules: '' };
+  const lock = { salt: 'c2FsdHNhbHRzYWx0c2FsdA', proof: 'cHJvb2Zwcm9vZnByb29mcHJvb2Zwcm9vZnByb29mcHI' };
+  const mentions = (conn: FakeConn, text: string) => conn.out.some((m) => JSON.stringify(m).includes(text));
+
+  it('requires end-to-end encryption', () => {
+    const a = login('ana');
+    send(a.id, { type: 'room.create', requestId: 'c', payload: { ...settings, private: true } });
+    expect(a.conn.last('server.error')?.payload.code).toBe('INVALID_MESSAGE');
+  });
+
+  it('is never listed, announced or leaked through presence to non-members', () => {
+    const outsider = login('eve');
+    send(outsider.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    const owner = login('ana');
+    send(owner.id, { type: 'room.join', requestId: 'j', payload: { roomId: 'lobby' } });
+    send(owner.id, { type: 'room.create', requestId: 'c', payload: { ...settings, name: 'Secret Family', lock, private: true } });
+    const room = owner.conn.last('room.joined')!.payload;
+    expect(room.kind).toBe('private');
+    send(owner.id, { type: 'room.pin', requestId: 'p', payload: { roomId: room.id, pinned: true } });
+    send(outsider.id, { type: 'room.list', requestId: 'l' });
+    expect(outsider.conn.last('room.listed')!.payload.rooms.map((r) => r.id)).toEqual(['lobby']);
+    // Nothing the outsider received mentions the room's id or name.
+    expect(mentions(outsider.conn, room.id)).toBe(false);
+    expect(mentions(outsider.conn, 'Secret Family')).toBe(false);
+    // Owner still sees it in their own presence.
+    expect(owner.conn.last('presence.snapshot')!.payload.find((p) => p.handle === 'ana')!.rooms).toContain(room.id);
+  });
+
+  it('members can join with the proof from the invite, and see each other in presence', () => {
+    const owner = login('ana');
+    send(owner.id, { type: 'room.create', requestId: 'c', payload: { ...settings, lock, private: true } });
+    const room = owner.conn.last('room.joined')!.payload;
+    const guest = login('ben');
+    send(guest.id, { type: 'room.join', requestId: 'j0', payload: { roomId: room.id } });
+    expect(guest.conn.last('server.error')?.payload.code).toBe('BAD_PASSWORD');
+    send(guest.id, { type: 'room.join', requestId: 'j1', payload: { roomId: room.id, proof: lock.proof } });
+    expect(guest.conn.last('room.joined')?.payload.id).toBe(room.id);
+    expect(guest.conn.last('presence.snapshot')!.payload.find((p) => p.handle === 'ana')!.rooms).toContain(room.id);
+  });
+
+  it('a resumed member gets the private room back in server.ready', () => {
+    const owner = login('ana');
+    send(owner.id, { type: 'room.create', requestId: 'c', payload: { ...settings, lock, private: true } });
+    const room = owner.conn.last('room.joined')!.payload;
+    const token = owner.conn.last('server.ready')!.payload.resumeToken;
+    hub.disconnect(owner.id);
+    const back = login('ana', token, owner.who);
+    const ready = back.conn.last('server.ready')!.payload;
+    expect(ready.joinedRooms).toContain(room.id);
+    expect(ready.rooms.map((r) => r.id)).toContain(room.id);
+  });
+
+  it('is not written to rooms.json even when pinned', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pulse-'));
+    const reg = new RoomRegistry({ dataDir: dir, idleMs: 1000, debounceMs: 0 });
+    const priv = reg.create(settings, 'k'.repeat(44), lock, 'private');
+    reg.setPinned(priv.id, true);
+    await reg.saveNow();
+    expect(JSON.parse(readFileSync(join(dir, 'rooms.json'), 'utf8')).rooms).toEqual([]);
   });
 });

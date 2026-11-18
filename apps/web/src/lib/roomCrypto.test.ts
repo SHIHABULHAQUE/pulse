@@ -50,3 +50,38 @@ describe('locked room crypto', () => {
     expect(a.ct).not.toBe(b.ct);
   });
 });
+
+describe('private room invites', () => {
+  it('derives the same proof/key from the same invite and keeps them independent', async () => {
+    const { deriveInviteSecret, newInviteSecret } = await import('./roomCrypto');
+    const salt = newSalt();
+    const invite = newInviteSecret();
+    const a = await deriveInviteSecret(invite, salt);
+    expect(await deriveInviteSecret(invite, salt)).toEqual(a);
+    expect(a.proof).not.toBe(a.key);
+    expect(a.invite).toBe(invite);
+    expect((await deriveInviteSecret(newInviteSecret(), salt)).key).not.toBe(a.key);
+  });
+
+  it('encrypts with an invite-derived key and only that key decrypts', async () => {
+    const { deriveInviteSecret, newInviteSecret } = await import('./roomCrypto');
+    const salt = newSalt();
+    const right = await deriveInviteSecret(newInviteSecret(), salt);
+    const wrong = await deriveInviteSecret(newInviteSecret(), salt);
+    const enc = await encryptBody(right, 'fam-1', { text: 'family only' });
+    expect(await decryptBody(right, 'fam-1', enc)).toEqual({ text: 'family only' });
+    await expect(decryptBody(wrong, 'fam-1', enc)).rejects.toThrow();
+  });
+
+  it('builds and parses invite links; rejects malformed ones', async () => {
+    const { inviteLink, parseInvite, newInviteSecret } = await import('./roomCrypto');
+    const salt = newSalt();
+    const invite = newInviteSecret();
+    const link = inviteLink('family-a1b2c3', salt, invite, 'https://therealkerala.in');
+    expect(link.startsWith('https://therealkerala.in/#join=family-a1b2c3.')).toBe(true);
+    expect(parseInvite(new URL(link).hash)).toEqual({ roomId: 'family-a1b2c3', salt, invite });
+    expect(parseInvite('#join=../etc.x.y')).toBeNull();
+    expect(parseInvite('#join=room-1.short.short')).toBeNull();
+    expect(parseInvite('')).toBeNull();
+  });
+});

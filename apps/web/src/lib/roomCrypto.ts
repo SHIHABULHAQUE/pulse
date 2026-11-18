@@ -11,7 +11,7 @@ import { b64urlToBytes, bytesToB64url } from './b64';
  */
 export const ROOM_KDF_ITERATIONS = 310_000;
 
-export type RoomSecret = { proof: string; key: string };
+export type RoomSecret = { proof: string; key: string; invite?: string };
 export type PlainBody = { text: string; image?: ImageAttachment };
 
 export function newSalt(): string {
@@ -47,4 +47,37 @@ export async function decryptBody(secret: RoomSecret, roomId: string, enc: Encry
   const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlToBytes(enc.iv), additionalData: new TextEncoder().encode(roomId) }, await aesKey(secret.key), b64urlToBytes(enc.ct));
   const parsed = JSON.parse(new TextDecoder().decode(plain)) as PlainBody;
   return { text: typeof parsed.text === 'string' ? parsed.text.slice(0, 4000) : '', ...(parsed.image ? { image: parsed.image } : {}) };
+}
+
+/* ------------------------------------------------------------------ private rooms (invite links) */
+
+/** A random 256-bit secret carried in the invite link's #fragment, which browsers never send to the server. */
+export function newInviteSecret(): string {
+  return bytesToB64url(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+async function hkdf(secret: Uint8Array<ArrayBuffer>, salt: string, info: string): Promise<Uint8Array<ArrayBuffer>> {
+  const material = await crypto.subtle.importKey('raw', secret, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode(salt), info: new TextEncoder().encode(info) }, material, 256));
+}
+
+/**
+ * Same split as password rooms (independent join proof + AES key), but the input is already a full-entropy random
+ * secret, so HKDF is used instead of a slow password KDF.
+ */
+export async function deriveInviteSecret(invite: string, salt: string): Promise<RoomSecret & { invite: string }> {
+  const raw = b64urlToBytes(invite);
+  if (raw.length < 16) throw new Error('Invalid invite');
+  const [proof, key] = await Promise.all([hkdf(raw, salt, 'pulse-room-auth'), hkdf(raw, salt, 'pulse-room-key')]);
+  return { proof: bytesToB64url(proof), key: bytesToB64url(key), invite };
+}
+
+/** Invite link format: <origin>/#join=<roomId>.<salt>.<secret> — everything after # stays in the browser. */
+export function inviteLink(roomId: string, salt: string, invite: string, origin: string = location.origin): string {
+  return `${origin}/#join=${roomId}.${salt}.${invite}`;
+}
+
+export function parseInvite(hash: string): { roomId: string; salt: string; invite: string } | null {
+  const match = /^#join=([a-z0-9-]{3,48})\.([A-Za-z0-9_-]{16,64})\.([A-Za-z0-9_-]{22,64})$/.exec(hash);
+  return match ? { roomId: match[1], salt: match[2], invite: match[3] } : null;
 }

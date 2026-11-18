@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS, type JoinedRoom, type LocalMessage, type Profile, typ
 
 export type ConnState = 'connecting' | 'online' | 'offline';
 export type Toast = { id: number; kind: 'error' | 'info'; text: string };
-export type DialogName = 'create' | 'directory' | 'settings' | 'search' | null;
+export type DialogName = 'create' | 'directory' | 'settings' | 'search' | 'invite' | null;
 
 type State = {
   conn: ConnState;
@@ -18,6 +18,8 @@ type State = {
   messages: Record<string, LocalMessage[]>;
   toasts: Toast[];
   dialog: DialogName;
+  /** Room whose invite link the invite dialog shows. */
+  inviteRoom: string | null;
   /** The voice channel this device is in. */
   voice: { roomId: string; muted: boolean; connecting: boolean; selfId: string | null } | null;
   /** Who is in each room's voice channel (for rooms we're members of). */
@@ -40,6 +42,7 @@ export const usePulse = create<State>((set) => ({
   messages: {},
   toasts: [],
   dialog: null,
+  inviteRoom: null,
   voice: null,
   voiceRooms: {},
   speaking: {},

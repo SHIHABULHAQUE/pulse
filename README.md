@@ -10,7 +10,8 @@ Pulse is an account-free realtime communication PWA. There is **no database**: t
 | 2 | Public rooms (create, directory, trending, slow mode, caps, expiry, pinning + `rooms.json`), text chat, IndexedDB, export/import (+ encrypted), offline queue, local search | ✅ Done |
 | — | **Password-protected rooms (E2EE), image messages, group voice (P2P mesh, ≤ 8)** | ✅ Done (pulled forward on request) |
 | 3 | 1:1 voice/video (P2P), TURN, Web Push for calls | ⏳ Next (TURN config + ICE servers already in place) |
-| 4 | DMs with E2EE, invite links, file transfer | ⏳ (password rooms already E2EE) |
+| — | **Private rooms: unlisted, invite link + QR, end-to-end encrypted** | ✅ Done |
+| 4 | DMs with E2EE (X25519), file transfer | ⏳ |
 | 5 | Nearby discovery | ⏳ |
 | 6 | Group video, mediasoup SFU for > 8 people, screen share | ⏳ (voice mesh done) |
 | 7 | Safety layer, moderation, full rate-limit policy | ⏳ (token-bucket limits already in place) |
@@ -114,7 +115,7 @@ Every frame is `{ "v": 1, "type", "requestId", "payload" }`, validated with Zod 
 | S → C | `presence.snapshot` | `[{ publicKey, handle, status, rooms[] }]` (invisible users omitted) |
 | C → S | `room.list` | — |
 | S → C | `room.listed` | `{ rooms }` (public rooms, busiest first) |
-| C → S | `room.create` | `{ name, topic, emoji, mode, memberCap, slowModeSec, rules, lock?: { salt, proof } }` |
+| C → S | `room.create` | `{ name, topic, emoji, mode, memberCap, slowModeSec, rules, lock?: { salt, proof }, private }` (private requires `lock`) |
 | C → S | `room.join` | `{ roomId, proof? }` (proof required for locked rooms) |
 | C → S | `room.leave` | `{ roomId }` |
 | S → C | `room.joined` | room |
@@ -136,6 +137,10 @@ Error codes: `INVALID_MESSAGE`, `AUTH_FAILED`, `NOT_AUTHENTICATED`, `RATE_LIMITE
 ### Password-protected rooms
 
 From the password and the room's public salt the client derives two independent values with PBKDF2-SHA256 (310k iterations): a **join proof** (sent to the server, which stores only `scrypt(proof)`) and an **AES-GCM-256 room key** (never leaves devices). Messages and images are encrypted with the room id as additional data. The server refuses plaintext in locked rooms and ciphertext in open rooms. Passwords can't be recovered or changed.
+
+### Private rooms
+
+Unlisted rooms joined only through an invite link: `https://<host>/#join=<roomId>.<salt>.<secret>`. The creator's device generates a random 256-bit secret; join proof and AES-GCM key are derived from it with HKDF-SHA256 (same split as password rooms). The secret lives in the URL **fragment**, which browsers never send to the server, and the app removes it from the address bar after reading it. The server never lists, announces or reveals private rooms to non-members: room updates go only to members, presence room lists are filtered per viewer, and private rooms are never written to `rooms.json`. Any member can re-share the link (also as a QR code). Anyone holding the link can join; links can't be revoked yet (that needs re-keying, planned with moderation).
 
 ### Images
 

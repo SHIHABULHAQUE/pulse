@@ -130,7 +130,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('profile.update'), requestId, payload: z.object({ handle: HandleSchema }) }),
   z.object({ type: z.literal('presence.update'), requestId, payload: z.object({ status: StatusSchema }) }),
   z.object({ type: z.literal('room.list'), requestId }),
-  z.object({ type: z.literal('room.create'), requestId, payload: RoomSettingsSchema.extend({ lock: RoomLockSchema.optional() }) }),
+  /** private: unlisted, invite-link only; requires a lock (derived from the invite secret). */
+  z.object({ type: z.literal('room.create'), requestId, payload: RoomSettingsSchema.extend({ lock: RoomLockSchema.optional(), private: z.boolean().default(false) }) }),
   z.object({ type: z.literal('room.join'), requestId, payload: z.object({ roomId: RoomIdSchema, proof: b64(128).optional() }) }),
   z.object({ type: z.literal('room.leave'), requestId, payload: z.object({ roomId: RoomIdSchema }) }),
   z.object({ type: z.literal('room.pin'), requestId, payload: z.object({ roomId: RoomIdSchema, pinned: z.boolean() }) }),

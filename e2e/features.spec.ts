@@ -108,3 +108,56 @@ test('group voice: two people connect peer-to-peer and hear each other', async (
   await expect(ana.page.locator('.voice-bar')).toContainText('1 in voice');
   await expect.poll(() => connected(ana.page)).toEqual([]);
 });
+
+test('private room: hidden from the directory, joined by invite link, key never sent to the server', async ({ browser }) => {
+  const ana = await person(browser, 'ana');
+  const ben = await person(browser, 'ben');
+  const eve = await person(browser, 'eve');
+
+  await ana.page.getByRole('button', { name: 'Create a room' }).click();
+  await ana.page.getByLabel('Name').fill('Kochi Family');
+  await ana.page.getByText('🔐 Private (invite link)').click();
+  await ana.page.getByRole('button', { name: 'Create room' }).click();
+
+  // The invite dialog opens straight away with a link and a QR code.
+  const dialog = ana.page.getByRole('dialog', { name: 'Invite to Kochi Family' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('img', { name: 'QR code for the invite link' })).toBeVisible();
+  const link = await dialog.getByLabel('Invite link').inputValue();
+  expect(link).toMatch(/^http:\/\/localhost:8788\/#join=kochi-family-[a-f0-9]{6}\.[\w-]+\.[\w-]{43}$/);
+  const secret = link.split('.').pop()!;
+  await ana.page.screenshot({ path: 'e2e/.results/invite.png' });
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(ana.page.getByText('🔐 PRIVATE · END-TO-END ENCRYPTED')).toBeVisible();
+
+  // Eve (no link) can't find it.
+  await eve.page.getByRole('button', { name: 'Browse rooms' }).first().click();
+  await eve.page.getByLabel('Search rooms').fill('Kochi Family');
+  await expect(eve.page.locator('.directory-item', { hasText: 'Kochi Family' })).toHaveCount(0);
+  await expect(eve.page.getByText('No rooms match.')).toBeVisible();
+
+  // Ben opens the link and lands in the room; the secret is removed from the address bar.
+  await ben.page.goto(link);
+  await expect(ben.page.getByRole('heading', { name: 'Kochi Family', level: 2 })).toBeVisible();
+  expect(ben.page.url()).not.toContain('#join');
+
+  await ben.page.getByLabel('Write a message').fill('hi from ben, family only');
+  await ben.page.keyboard.press('Enter');
+  await expect(ana.page.getByRole('log').getByText('hi from ben, family only')).toBeVisible();
+
+  // Ben can re-share (he has the invite secret too).
+  await ben.page.getByRole('button', { name: 'Invite', exact: true }).click();
+  expect(await ben.page.getByLabel('Invite link').inputValue()).toBe(link);
+
+  // Neither the secret nor the plaintext ever went over the WebSocket, and Eve never heard of the room.
+  for (const who of [ana, ben]) {
+    expect(who.sent.join('\n')).not.toContain(secret);
+    expect(who.sent.join('\n')).not.toContain('family only');
+  }
+  const eveReceived = await eve.page.evaluate(() => document.body.innerText);
+  expect(eveReceived).not.toContain('Kochi Family');
+
+  // A broken link gives a clear error instead of joining.
+  await eve.page.goto(link.slice(0, -4) + 'AAAA');
+  await expect(eve.page.getByRole('alert').filter({ hasText: 'This invite link is not valid' })).toBeVisible();
+});

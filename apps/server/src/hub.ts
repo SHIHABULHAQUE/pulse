@@ -88,7 +88,8 @@ export class Hub {
   sweep(): void {
     const now = this.now();
     for (const [token, parked] of this.parked) if (parked.expiresAt <= now) this.parked.delete(token);
-    for (const roomId of this.rooms.sweep()) this.broadcastAll({ type: 'room.removed', requestId: 'sweep', payload: { roomId } });
+    // Private rooms are only removed when empty, so there is nobody to tell (and nobody else may learn they existed).
+    for (const room of this.rooms.sweep()) if (room.kind === 'public') this.broadcastAll({ type: 'room.removed', requestId: 'sweep', payload: { roomId: room.id } });
     this.connLimiter.sweep();
     this.keyLimiter.sweep();
   }
@@ -113,24 +114,41 @@ export class Hub {
     for (const s of this.sessions.values()) if (s.ready && s.rooms.has(roomId)) this.send(s, message);
   }
 
-  private broadcastRoom(roomId: string): void {
+  /** Public room updates go to everyone (directory); private room updates only to its members. */
+  private broadcastRoom(roomId: string, requestId = 'room'): void {
     const room = this.rooms.view(roomId);
-    if (room) this.broadcastAll({ type: 'room.updated', requestId: 'room', payload: room });
+    if (!room) return;
+    const message: ServerMessage = { type: 'room.updated', requestId, payload: room };
+    if (room.kind === 'private') this.broadcastToRoom(roomId, message);
+    else this.broadcastAll(message);
   }
 
-  presence(): Presence[] {
+  /** Public rooms plus the private rooms this session belongs to. */
+  private roomsFor(session: Session): ReturnType<RoomRegistry['list']> {
+    const rooms = this.rooms.list();
+    for (const id of session.rooms) if (this.rooms.isPrivate(id)) rooms.push(this.rooms.view(id)!);
+    return rooms;
+  }
+
+  /**
+   * Who is online. Room lists are filtered for the viewer: public rooms, plus private rooms the viewer is also in,
+   * so nobody learns which private rooms other people belong to.
+   */
+  presence(viewer?: { rooms: Set<string> }): Presence[] {
     const byKey = new Map<string, Presence>();
+    const visible = (roomId: string) => !this.rooms.isPrivate(roomId) || (viewer?.rooms.has(roomId) ?? false);
     for (const s of this.sessions.values()) {
       if (!s.ready || s.status === 'invisible') continue;
+      const rooms = [...s.rooms].filter(visible);
       const existing = byKey.get(s.publicKey);
-      if (existing) { existing.rooms = [...new Set([...existing.rooms, ...s.rooms])]; continue; }
-      byKey.set(s.publicKey, { publicKey: s.publicKey, handle: s.handle, status: s.status, rooms: [...s.rooms] });
+      if (existing) { existing.rooms = [...new Set([...existing.rooms, ...rooms])]; continue; }
+      byKey.set(s.publicKey, { publicKey: s.publicKey, handle: s.handle, status: s.status, rooms });
     }
     return [...byKey.values()];
   }
 
   private broadcastPresence(): void {
-    this.broadcastAll({ type: 'presence.snapshot', requestId: 'presence', payload: this.presence() });
+    for (const s of this.sessions.values()) if (s.ready) this.send(s, { type: 'presence.snapshot', requestId: 'presence', payload: this.presence(s) });
   }
 
   /** Both per-connection and per-identity buckets must allow the action. */
@@ -159,7 +177,7 @@ export class Hub {
 
     switch (message.type) {
       case 'room.list':
-        this.send(session, { type: 'room.listed', requestId: message.requestId, payload: { rooms: this.rooms.list() } });
+        this.send(session, { type: 'room.listed', requestId: message.requestId, payload: { rooms: this.roomsFor(session) } });
         return;
       case 'presence.update':
         session.status = message.payload.status;
@@ -173,8 +191,9 @@ export class Hub {
       case 'room.create': {
         if (this.limited(session, 'roomCreate', message.requestId)) return;
         if (session.rooms.size >= LIMITS.roomsPerSession) { this.error(session, message.requestId, 'TOO_MANY_ROOMS', `You can be in at most ${LIMITS.roomsPerSession} rooms`); return; }
-        const { lock, ...settings } = message.payload;
-        const room = this.rooms.create(settings, session.publicKey, lock);
+        const { lock, private: isPrivate, ...settings } = message.payload;
+        if (isPrivate && !lock) { this.error(session, message.requestId, 'INVALID_MESSAGE', 'Private rooms must be end-to-end encrypted'); return; }
+        const room = this.rooms.create(settings, session.publicKey, lock, isPrivate ? 'private' : 'public');
         this.joinRoom(session, room.id, message.requestId, lock?.proof);
         return;
       }
@@ -196,8 +215,7 @@ export class Hub {
       case 'room.pin': {
         const { roomId, pinned } = message.payload;
         if (this.rooms.ownerOf(roomId) !== session.publicKey) { this.error(session, message.requestId, 'FORBIDDEN', 'Only the room owner can pin it'); return; }
-        const room = this.rooms.setPinned(roomId, pinned);
-        if (room) this.broadcastAll({ type: 'room.updated', requestId: message.requestId, payload: room });
+        if (this.rooms.setPinned(roomId, pinned)) this.broadcastRoom(roomId, message.requestId);
         return;
       }
       case 'chat.send': {
@@ -290,7 +308,7 @@ export class Hub {
       }
     }
 
-    this.send(session, { type: 'server.ready', requestId: message.requestId, payload: { sessionId: session.id, publicKey, resumeToken: session.resumeToken, resumed, joinedRooms: [...session.rooms], rooms: this.rooms.list() } });
+    this.send(session, { type: 'server.ready', requestId: message.requestId, payload: { sessionId: session.id, publicKey, resumeToken: session.resumeToken, resumed, joinedRooms: [...session.rooms], rooms: this.roomsFor(session) } });
     for (const roomId of session.rooms) this.broadcastRoom(roomId);
     this.broadcastPresence();
   }

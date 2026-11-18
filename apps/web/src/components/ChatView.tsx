@@ -9,7 +9,7 @@ import { Modal } from './Modal';
 import { formatDay, formatTime, hueFor, initials } from './util';
 
 export function ChatView() {
-  const { activeRoom, directory, messages, conn, identity, set } = usePulse();
+  const { activeRoom, directory, messages, conn, identity, joined, set } = usePulse();
   const room = directory.find((r) => r.id === activeRoom) ?? null;
   const list = (activeRoom && messages[activeRoom]) || [];
   const [draft, setDraft] = useState('');
@@ -21,6 +21,7 @@ export function ChatView() {
   const scroller = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const isOwner = !!room && !!identity && room.ownerKey === identity.publicKeySpki;
+  const canInvite = room?.kind === 'private' && !!joined.find((r) => r.id === room.id)?.secret?.invite;
 
   useEffect(() => {
     const el = scroller.current;
@@ -90,7 +91,7 @@ export function ChatView() {
           <span className="room-emoji" aria-hidden="true">{room?.emoji ?? '#'}</span>
           <div>
             <div className="eyebrow">
-              {room?.locked ? '🔒 END-TO-END ENCRYPTED' : 'PUBLIC ROOM'}
+              {room?.kind === 'private' ? '🔐 PRIVATE · END-TO-END ENCRYPTED' : room?.locked ? '🔒 END-TO-END ENCRYPTED' : 'PUBLIC ROOM'}
               {room && room.slowModeSec > 0 ? ` · SLOW MODE ${room.slowModeSec}s` : ''}
             </div>
             <h2>{room?.name ?? activeRoom}</h2>
@@ -99,6 +100,7 @@ export function ChatView() {
         </div>
         <div className="chat-actions">
           <div className="member-count" aria-label={`${room?.members ?? 0} people here`}>{room?.members ?? 0} <span>here</span></div>
+          {canInvite && <button className="primary small" onClick={() => set({ dialog: 'invite', inviteRoom: room!.id })}>Invite</button>}
           {room?.rules && <button className="ghost-button small" aria-expanded={showRules} onClick={() => setShowRules((v) => !v)}>Rules</button>}
           {isOwner && room && <button className="ghost-button small" onClick={() => pinRoom(room.id, !room.pinned)}>{room.pinned ? 'Unpin' : 'Pin'}</button>}
           {activeRoom !== 'lobby' && <button className="ghost-button small" onClick={() => leaveRoom(activeRoom)}>Leave</button>}
@@ -112,7 +114,8 @@ export function ChatView() {
           <div className="empty-state">
             <div className="pulse-ring" aria-hidden="true">{room?.locked ? '🔒' : '◉'}</div>
             <h3>Welcome to {room?.name ?? 'this room'}</h3>
-            <p>{room?.locked ? 'Messages here are end-to-end encrypted with the room password.' : 'Messages are relayed live and stored only on the devices of people here.'}</p>
+            <p>{room?.kind === 'private' ? 'Only people with the invite link can join. Messages are end-to-end encrypted.' : room?.locked ? 'Messages here are end-to-end encrypted with the room password.' : 'Messages are relayed live and stored only on the devices of people here.'}</p>
+            {canInvite && <div className="row-actions"><button className="primary" onClick={() => set({ dialog: 'invite', inviteRoom: room!.id })}>Invite people</button></div>}
           </div>
         ) : list.map((m) => {
           const day = formatDay(m.sentAt);

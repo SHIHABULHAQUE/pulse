@@ -39,7 +39,7 @@ export function Sidebar() {
           return (
             <button key={entry.id} className={`room-item ${entry.id === activeRoom ? 'selected' : ''}`} aria-current={entry.id === activeRoom ? 'page' : undefined} onClick={() => set({ activeRoom: entry.id })}>
               <span className="room-icon" aria-hidden="true">{room?.emoji ?? '#'}</span>
-              <span className="grow"><strong>{room?.locked ? '🔒 ' : ''}{room?.name ?? entry.name}</strong><small>{room ? `${room.members} online` : 'offline'}{room?.pinned ? ' · pinned' : ''}</small></span>
+              <span className="grow"><strong>{room?.kind === 'private' ? '🔐 ' : room?.locked ? '🔒 ' : ''}{room?.name ?? entry.name}</strong><small>{room ? `${room.members} online` : 'offline'}{room?.pinned ? ' · pinned' : ''}</small></span>
               {(voiceRooms[entry.id]?.length ?? 0) > 0 && <span className={`voice-count ${voice?.roomId === entry.id ? 'me' : ''}`} title="People in voice">🔊 {voiceRooms[entry.id].length}</span>}
             </button>
           );

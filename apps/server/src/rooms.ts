@@ -55,12 +55,12 @@ export class RoomRegistry {
 
   get size(): number { return this.defs.size; }
 
-  create(settings: RoomSettings, ownerKey: string, lock?: { salt: string; proof: string }): Room {
+  create(settings: RoomSettings, ownerKey: string, lock?: { salt: string; proof: string }, kind: Room['kind'] = 'public'): Room {
     const parsed = RoomSettingsSchema.parse(settings);
     let id = slugify(parsed.name);
     while (this.defs.has(id)) id = slugify(parsed.name);
     const now = this.now();
-    this.defs.set(id, { ...parsed, id, kind: 'public', ownerKey, pinned: false, locked: !!lock, keySalt: lock?.salt ?? null, passwordHash: lock ? hashProof(lock.proof) : null, createdAt: now, lastActiveAt: now });
+    this.defs.set(id, { ...parsed, id, kind, ownerKey, pinned: false, locked: !!lock, keySalt: lock?.salt ?? null, passwordHash: lock ? hashProof(lock.proof) : null, createdAt: now, lastActiveAt: now });
     return this.view(id)!;
   }
 
@@ -106,14 +106,16 @@ export class RoomRegistry {
 
   ownerOf(id: string): string | null { return this.defs.get(id)?.ownerKey ?? null; }
 
-  /** Remove empty, unpinned rooms idle longer than idleMs. Returns removed ids. */
-  sweep(): string[] {
-    const removed: string[] = [];
+  isPrivate(id: string): boolean { return this.defs.get(id)?.kind === 'private'; }
+
+  /** Remove empty, unpinned rooms idle longer than idleMs. Returns removed rooms. */
+  sweep(): { id: string; kind: Room['kind'] }[] {
+    const removed: { id: string; kind: Room['kind'] }[] = [];
     const cutoff = this.now() - this.opts.idleMs;
     for (const [id, def] of this.defs) {
       if (def.pinned || id === LOBBY_ID || this.memberCount(id) > 0 || def.lastActiveAt > cutoff) continue;
       this.defs.delete(id);
-      removed.push(id);
+      removed.push({ id, kind: def.kind });
     }
     return removed;
   }

@@ -21,7 +21,7 @@ export type StoredIdentity = { publicKeySpki: string; publicKeyJwk: JsonWebKey; 
 export type Profile = { handle: string; bio: string; status: Status };
 export type Settings = { readReceipts: boolean; typingIndicators: boolean; sounds: boolean; theme: 'system' | 'dark' | 'light'; language: string };
 /** secret: password-derived join proof and AES key for locked rooms (see roomCrypto.ts). */
-export type JoinedRoom = { id: string; name: string; owned: boolean; joinedAt: number; secret?: { proof: string; key: string } };
+export type JoinedRoom = { id: string; name: string; owned: boolean; joinedAt: number; secret?: { proof: string; key: string; invite?: string } };
 export type Contact = { publicKey: string; handle: string; addedAt: number; blocked: boolean };
 
 export const DEFAULT_SETTINGS: Settings = { readReceipts: true, typingIndicators: true, sounds: true, theme: 'system', language: 'en' };

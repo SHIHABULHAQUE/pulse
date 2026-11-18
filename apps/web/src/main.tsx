@@ -5,7 +5,7 @@ import { boot } from './lib/client';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { PeoplePanel } from './components/PeoplePanel';
-import { CreateRoomDialog, DirectoryDialog, SearchDialog, SettingsDialog } from './components/dialogs';
+import { CreateRoomDialog, DirectoryDialog, InviteDialog, SearchDialog, SettingsDialog } from './components/dialogs';
 import './styles.css';
 
 const CONN_LABEL = { online: 'Connected', connecting: 'Connecting…', offline: 'Offline: reconnecting' } as const;
@@ -46,6 +46,7 @@ function App() {
       {dialog === 'directory' && <DirectoryDialog />}
       {dialog === 'search' && <SearchDialog />}
       {dialog === 'settings' && <SettingsDialog />}
+      {dialog === 'invite' && <InviteDialog />}
       <div className="toasts" aria-live="assertive">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.kind}`} role={t.kind === 'error' ? 'alert' : 'status'}>{t.text}</div>)}
       </div>

@@ -5,7 +5,7 @@ import {
   type JoinedRoom, type LocalMessage, type Settings
 } from './db';
 import { loadIdentity, signChallenge } from './identity';
-import { decryptBody, deriveRoomSecret, encryptBody, newSalt, type RoomSecret } from './roomCrypto';
+import { decryptBody, deriveInviteSecret, deriveRoomSecret, encryptBody, newInviteSecret, newSalt, parseInvite, type RoomSecret } from './roomCrypto';
 import { onReconnected, onSignal, onVoiceJoined, onVoiceLeft, onVoiceState } from './voice';
 
 const RESUME_KEY = 'pulse.resume';
@@ -22,6 +22,29 @@ const inFlight = new Set<string>();
 const pendingSecrets = new Map<string, RoomSecret>();
 
 const secretFor = (roomId: string): RoomSecret | undefined => store().joined.find((r) => r.id === roomId)?.secret;
+/** An invite link opened on this device, waiting for the connection to be ready. */
+let pendingInvite: { roomId: string; salt: string; invite: string } | null = null;
+
+/** Reads #join=… from the address bar, then removes it so the secret doesn't linger in history or get shared by accident. */
+function captureInvite(): void {
+  const invite = parseInvite(location.hash);
+  if (!invite) return;
+  pendingInvite = invite;
+  history.replaceState(null, '', location.pathname + location.search);
+  if (authed) void acceptPendingInvite();
+}
+
+async function acceptPendingInvite(): Promise<void> {
+  const invite = pendingInvite;
+  if (!invite) return;
+  pendingInvite = null;
+  if (store().joined.some((r) => r.id === invite.roomId)) { store().set({ activeRoom: invite.roomId }); return; }
+  let secret: RoomSecret & { invite: string };
+  try { secret = await deriveInviteSecret(invite.invite, invite.salt); } catch { toast('This invite link is broken', 'error'); return; }
+  const requestId = `user:invite:${invite.roomId}`;
+  pendingSecrets.set(requestId, secret);
+  if (!send({ type: 'room.join', requestId, payload: { roomId: invite.roomId, proof: secret.proof } })) { pendingSecrets.delete(requestId); pendingInvite = invite; }
+}
 
 function wsUrl(): string {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
@@ -44,6 +67,8 @@ export async function boot(): Promise<void> {
     toast(window.isSecureContext ? `Could not load your identity: ${(err as Error).message}` : 'Pulse needs HTTPS (or localhost) to create your identity.', 'error');
     return;
   }
+  captureInvite();
+  window.addEventListener('hashchange', captureInvite);
   connect();
   window.addEventListener('online', () => { if (!ws) { attempt = 0; connect(); } });
   // Browsers keep a dead socket "open" for a long time after the network drops; close it ourselves.
@@ -118,6 +143,7 @@ async function onMessage(socket: WebSocket, message: ServerMessage): Promise<voi
       if (s.profile && s.profile.status !== 'online') send({ type: 'presence.update', requestId: 'status', payload: { status: s.profile.status } });
       onReconnected();
       void flushOutbox();
+      void acceptPendingInvite();
       return;
     }
     case 'voice.joined':
@@ -157,7 +183,8 @@ async function onMessage(socket: WebSocket, message: ServerMessage): Promise<voi
         await setKv('rooms', joined);
         await loadRoomHistory(room.id);
       }
-      if (message.requestId.startsWith('user:')) s.set({ activeRoom: room.id, dialog: null });
+      if (message.requestId.startsWith('user:create:') && room.kind === 'private') s.set({ activeRoom: room.id, dialog: 'invite', inviteRoom: room.id });
+      else if (message.requestId.startsWith('user:')) s.set({ activeRoom: room.id, dialog: null });
       else if (!store().activeRoom) s.set({ activeRoom: room.id });
       void flushOutbox();
       return;
@@ -202,6 +229,7 @@ async function onError(requestId: string, { code, message, retryAfterMs }: Extra
   }
   pendingSecrets.delete(requestId);
   if (requestId.startsWith('voice:')) usePulse.getState().set({ voice: null });
+  if (requestId.startsWith('user:invite:')) { toast(code === 'ROOM_NOT_FOUND' ? 'That private room no longer exists (rooms expire when empty)' : code === 'BAD_PASSWORD' ? 'This invite link is not valid' : message, 'error'); return; }
   toast(message, 'error');
 }
 
@@ -303,17 +331,24 @@ export function leaveRoom(roomId: string): void {
   if (!send({ type: 'room.leave', requestId: `leave:${roomId}`, payload: { roomId } })) void forgetRoom(roomId);
 }
 
-/** Creates a room; with a password it is locked and end-to-end encrypted. */
-export async function createRoom(settings: RoomSettings, password?: string): Promise<boolean> {
+export type RoomAccess = { kind: 'open' } | { kind: 'password'; password: string } | { kind: 'private' };
+
+/**
+ * Creates a room.
+ * - open: listed, plaintext (moderatable)
+ * - password: listed, end-to-end encrypted with a password-derived key
+ * - private: unlisted, joined only through an invite link whose #fragment carries a random secret (E2EE)
+ */
+export async function createRoom(settings: RoomSettings, access: RoomAccess = { kind: 'open' }): Promise<boolean> {
   const requestId = `user:create:${crypto.randomUUID()}`;
   let lock: { salt: string; proof: string } | undefined;
-  if (password) {
+  if (access.kind !== 'open') {
     const salt = newSalt();
-    const secret = await deriveRoomSecret(password, salt);
+    const secret = access.kind === 'password' ? await deriveRoomSecret(access.password, salt) : await deriveInviteSecret(newInviteSecret(), salt);
     pendingSecrets.set(requestId, secret);
     lock = { salt, proof: secret.proof };
   }
-  const ok = send({ type: 'room.create', requestId, payload: { ...settings, ...(lock ? { lock } : {}) } });
+  const ok = send({ type: 'room.create', requestId, payload: { ...settings, ...(lock ? { lock } : {}), private: access.kind === 'private' } });
   if (!ok) pendingSecrets.delete(requestId);
   return ok;
 }

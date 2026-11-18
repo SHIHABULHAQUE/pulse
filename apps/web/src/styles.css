@@ -242,3 +242,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .voice-controls { display: flex; gap: 6px; margin-left: auto; }
 .ghost-button.on { border-color: var(--danger-border); color: var(--danger); }
 @media (max-width: 700px) { .voice-bar { margin: 10px 14px 0; } .voice-controls { margin-left: 0; width: 100%; } .voice-controls button { flex: 1; } }
+
+/* invites */
+.invite { display: grid; gap: 12px; }
+.invite .inline-form input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.invite .full { margin-top: 0; }
+.qr { justify-self: center; border-radius: 12px; background: #fff; padding: 8px; border: 1px solid var(--border); }

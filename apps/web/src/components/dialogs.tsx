@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import QRCode from 'qrcode';
 import { HandleSchema, RoomSettingsSchema, type Room, type RoomSettings } from '@pulse/protocol';
 import { Modal } from './Modal';
 import { toast, usePulse } from '../store';
 import { createRoom, joinRoom, refreshDirectory, updateProfile } from '../lib/client';
 import { applyImport, buildExport, downloadJson, encryptExport, exportFilename, isEncrypted, parseImport } from '../lib/backup';
+import { inviteLink } from '../lib/roomCrypto';
 import { searchMessages, storageEstimate, wipeDevice, type LocalMessage } from '../lib/db';
 import { fingerprint } from '../lib/identity';
 import { formatBytes, formatDay, formatTime } from './util';
@@ -14,7 +16,8 @@ const close = () => usePulse.getState().set({ dialog: null });
 
 export function CreateRoomDialog() {
   const [form, setForm] = useState<RoomSettings>({ name: '', topic: '', emoji: '💬', mode: 'both', memberCap: 100, slowModeSec: 0, rules: '' });
-  const [usePassword, setUsePassword] = useState(false);
+  const [access, setAccess] = useState<'open' | 'password' | 'private'>('open');
+  const usePassword = access === 'password';
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -28,7 +31,10 @@ export function CreateRoomDialog() {
     if (usePassword && password.length < 4) { setError('Use a password of at least 4 characters'); return; }
     setBusy(true);
     try {
-      if (!(await createRoom(parsed.data, usePassword ? password : undefined))) { setError('You are offline'); return; }
+      const choice = access === 'password' ? { kind: 'password' as const, password } : { kind: access };
+      if (!(await createRoom(parsed.data, choice))) { setError('You are offline'); return; }
+      if (access !== 'private') close(); // private rooms open the invite dialog once created
+      return;
       close();
     } finally { setBusy(false); }
   }
@@ -58,8 +64,9 @@ export function CreateRoomDialog() {
 
         <fieldset className="lock-box">
           <legend className="sr-only">Access</legend>
-          <label className="toggle"><input type="radio" name="access" checked={!usePassword} onChange={() => setUsePassword(false)} /> <span><strong>Open</strong><small>Anyone can join from the directory.</small></span></label>
-          <label className="toggle"><input type="radio" name="access" checked={usePassword} onChange={() => setUsePassword(true)} /> <span><strong>🔒 Password protected</strong><small>Only people with the password can join. Messages and images are end-to-end encrypted with it, so the server can't read them.</small></span></label>
+          <label className="toggle"><input type="radio" name="access" checked={access === 'open'} onChange={() => setAccess('open')} /> <span><strong>Open</strong><small>Listed in the directory. Anyone can join.</small></span></label>
+          <label className="toggle"><input type="radio" name="access" checked={access === 'password'} onChange={() => setAccess('password')} /> <span><strong>🔒 Password protected</strong><small>Listed in the directory, but only people with the password can join. Messages and images are end-to-end encrypted with it.</small></span></label>
+          <label className="toggle"><input type="radio" name="access" checked={access === 'private'} onChange={() => setAccess('private')} /> <span><strong>🔐 Private (invite link)</strong><small>Hidden from the directory. People join only with your invite link or QR code. End-to-end encrypted: the key is inside the link, so the server never sees it.</small></span></label>
           {usePassword && (
             <div className="inline-form">
               <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Room password" aria-label="Room password" autoComplete="new-password" autoFocus />
@@ -69,7 +76,7 @@ export function CreateRoomDialog() {
           {usePassword && <p className="warn">Share the password privately. It can't be recovered or changed. If it's lost, messages in this room can't be decrypted.</p>}
         </fieldset>
 
-        <p className="hint">Listed in the room directory. Empty rooms expire after a while unless you pin them.</p>
+        <p className="hint">{access === 'private' ? 'Private rooms disappear when everyone has left for a while, unless you pin them.' : 'Empty rooms expire after a while unless you pin them.'}</p>
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="row-actions end"><button type="button" className="ghost-button" onClick={close}>Cancel</button><button className="primary" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create room'}</button></div>
       </form>
@@ -138,6 +145,47 @@ function DirectoryItem({ room: r, trending, joined }: { room: Room; trending: bo
         </button>
       )}
     </li>
+  );
+}
+
+/* ------------------------------------------------------------------ invite */
+
+export function InviteDialog() {
+  const { inviteRoom, joined, directory } = usePulse();
+  const entry = joined.find((r) => r.id === inviteRoom);
+  const room = directory.find((r) => r.id === inviteRoom);
+  const [qr, setQr] = useState('');
+  const [copied, setCopied] = useState(false);
+  const link = entry?.secret?.invite && room?.keySalt ? inviteLink(room.id, room.keySalt, entry.secret.invite) : '';
+
+  useEffect(() => {
+    if (!link) return;
+    void QRCode.toDataURL(link, { margin: 1, width: 240, errorCorrectionLevel: 'M' }).then(setQr);
+  }, [link]);
+
+  async function copy() {
+    try { await navigator.clipboard.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { toast('Copy failed: select the link and copy it manually', 'error'); }
+  }
+
+  async function share() {
+    try { await navigator.share({ title: `Join ${room?.name ?? 'my room'} on Pulse`, text: `Join my private room "${room?.name ?? ''}" on Pulse`, url: link }); } catch { /* cancelled */ }
+  }
+
+  return (
+    <Modal title={`Invite to ${room?.name ?? 'room'}`} onClose={close}>
+      {!link ? <p className="muted">The invite link isn't available on this device.</p> : (
+        <div className="invite">
+          <p className="hint">Anyone with this link can join and read the room, so share it only with people you trust. It works only while the room exists.</p>
+          <div className="inline-form">
+            <input readOnly value={link} aria-label="Invite link" onFocus={(e) => e.currentTarget.select()} />
+            <button className="primary" onClick={() => void copy()}>{copied ? 'Copied ✓' : 'Copy'}</button>
+          </div>
+          {'share' in navigator && <button className="ghost-button full" onClick={() => void share()}>Share…</button>}
+          {qr && <img className="qr" src={qr} alt="QR code for the invite link" width={240} height={240} />}
+          <p className="hint">🔐 The part after <code>#</code> holds the room's encryption key. Browsers never send it to the server, so the server can't read this room.</p>
+        </div>
+      )}
+    </Modal>
   );
 }
 

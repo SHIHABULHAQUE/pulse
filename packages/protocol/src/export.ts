@@ -58,7 +58,7 @@ export const ExportRoomSchema = z.object({
   owned: z.boolean().default(false),
   joinedAt: z.number().int(),
   /** Password-derived values for locked rooms so this device can rejoin and decrypt. Optional (added in v1, additive). */
-  secret: z.object({ proof: b64, key: b64 }).optional()
+  secret: z.object({ proof: b64, key: b64, invite: b64.optional() }).optional()
 });
 
 export const ExportMessageSchema = z.object({

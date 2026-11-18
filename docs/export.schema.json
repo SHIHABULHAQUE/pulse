@@ -248,6 +248,10 @@
                   "key": {
                     "type": "string",
                     "maxLength": 20000
+                  },
+                  "invite": {
+                    "type": "string",
+                    "maxLength": 20000
                   }
                 },
                 "required": [
